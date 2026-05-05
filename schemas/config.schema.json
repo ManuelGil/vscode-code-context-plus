@@ -1,0 +1,18 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"type": "object",
+	"properties": {
+		"codeContextPlus.enable": {
+			"type": "boolean",
+			"default": true,
+			"scope": "resource",
+			"description": "Enable or disable the extension."
+		},
+		"codeContextPlus.notes.notesFolder": {
+			"type": "string",
+			"default": ".context/notes",
+			"scope": "resource",
+			"description": "Folder (relative to the workspace) where CodeContext+ stores notes and generated files."
+		}
+	}
+}

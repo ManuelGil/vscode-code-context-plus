@@ -1,0 +1,17 @@
+{
+	"codeContextPlus.enable.description": "Enable or disable the extension",
+	"codeContextPlus.changeWorkspace.title": "Change workspace folder",
+	"codeContextPlus.notes.notesFolder.description": "Folder (relative to the workspace) where CodeContext+ stores notes and generated files.",
+	"codeContextPlus.notesExplorer.title": "Notes",
+	"codeContextPlus.createProjectNote.title": "Create project note",
+	"codeContextPlus.openProjectNote.title": "Open project note",
+	"codeContextPlus.insertNoteLink.title": "Insert note link",
+	"codeContextPlus.goToNoteById.title": "Go to note by ID",
+	"codeContextPlus.openLinkedNote.title": "Open linked note",
+	"codeContextPlus.openReference.title": "Open code reference",
+	"codeContextPlus.openBacklinks.title": "Open backlinks",
+	"codeContextPlus.openRelatedNotes.title": "Open related notes",
+	"codeContextPlus.openContextForFile.title": "Show context for current file",
+	"codeContextPlus.openContextForLine.title": "Show context for this line",
+	"codeContextPlus.notesExplorer.refreshList.title": "Refresh notes list"
+}
