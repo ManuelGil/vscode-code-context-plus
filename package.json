@@ -2,7 +2,7 @@
 	"name": "vscode-code-context-plus",
 	"displayName": "CodeContext+ - Navigate context directly from your code",
 	"description": "See where context exists in your code and open related notes directly from any file or line.",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"icon": "icon.png",
 	"license": "MIT",
 	"publisher": "imgildev",
@@ -189,7 +189,7 @@
 		"@commitlint/config-conventional": "^19.8.1",
 		"@types/mocha": "^10.0.10",
 		"@types/mustache": "^4.2.6",
-		"@types/node": "^22.19.17",
+		"@types/node": "^22.19.18",
 		"@types/vscode": "^1.102.0",
 		"@vscode/l10n-dev": "^0.0.35",
 		"@vscode/test-cli": "^0.0.12",
@@ -206,16 +206,13 @@
 		"fast-glob": "^3.3.3",
 		"ignore": "^7.0.5",
 		"mustache": "^4.2.0",
-		"vscode-marketplace-client": "^1.2.1"
+		"vscode-marketplace-client": "^1.2.2"
 	},
 	"pnpm": {
 		"overrides": {
-			"diff": "^8.0.3",
-			"follow-redirects": "^1.16.0",
-			"picomatch": "^2.3.2",
-			"minimatch": "10.2.5",
-			"serialize-javascript": "^7.0.5",
-			"yaml": "^2.8.3"
+			"diff@>=6.0.0 <8.0.3": ">=8.0.3",
+			"serialize-javascript@<7.0.5": ">=7.0.5",
+			"fast-uri@<=3.1.1": ">=3.1.2"
 		},
 		"onlyBuiltDependencies": [
 			"esbuild"

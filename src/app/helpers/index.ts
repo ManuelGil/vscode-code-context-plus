@@ -1,6 +1,7 @@
 export * from './debounce.helper';
 export * from './error-message.helper';
 export * from './find-files.helper';
+export * from './frontmatter-dialect.helper';
 export * from './open-document.helper';
 export * from './path.helper';
 export * from './path-format.helper';
@@ -8,6 +9,7 @@ export * from './read-file-content.helper';
 export * from './relative-path.helper';
 export * from './resolve.helper';
 export * from './save-file.helper';
+export * from './semantic.helper';
 export * from './text.helper';
 export * from './timeout.helper';
 export * from './workspace-root.helper';

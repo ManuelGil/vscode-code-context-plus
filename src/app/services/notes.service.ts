@@ -5,6 +5,7 @@ import {
   basenameFromFsPath,
   findFiles,
   getWorkspaceFolderUri,
+  parseFrontmatterDialect,
   readFileContent,
   toPosixPath,
 } from '../helpers';
@@ -459,7 +460,7 @@ export class NotesService {
   async createNote(
     title: string,
     content = '',
-    tags: string[] = [],
+    tags?: string[],
   ): Promise<Note | null> {
     await this.ensureNotesDirectoryExists();
     if (!this.notesDir) {
@@ -477,7 +478,7 @@ export class NotesService {
       ).fsPath,
       createdAt: now,
       updatedAt: now,
-      tags,
+      ...(tags !== undefined ? { tags } : {}),
     };
 
     try {
@@ -627,7 +628,10 @@ export class NotesService {
 
       const frontmatterMatch = content.match(this.frontmatterRegex);
       const frontmatter = frontmatterMatch?.[1] ?? '';
-      const fields = this.parseFrontmatterFields(frontmatter);
+      const parsed = parseFrontmatterDialect(frontmatter, {
+        listKeys: ['tags', 'links'],
+      });
+      const fields = parsed.scalars;
       const noteContent = frontmatterMatch
         ? content.replace(frontmatterMatch[0], '').trim()
         : content.trim();
@@ -638,6 +642,14 @@ export class NotesService {
 
       const references = this.parseReferencesFromFrontmatter(frontmatter);
 
+      if (parsed.warnings.length > 0) {
+        for (const warning of parsed.warnings) {
+          console.warn(
+            `[CodeContext+] Frontmatter warning in ${fileUri.fsPath}: ${warning}`,
+          );
+        }
+      }
+
       return {
         id: fields.id ?? '',
         title: fields.title ?? fileName,
@@ -645,8 +657,12 @@ export class NotesService {
         filePath: fileUri.fsPath,
         createdAt,
         updatedAt,
-        tags: this.parseListField(fields.tags),
-        links: this.parseListField(fields.links),
+        tags: Object.prototype.hasOwnProperty.call(parsed.lists, 'tags')
+          ? parsed.lists.tags
+          : this.parseListField(fields.tags),
+        links: Object.prototype.hasOwnProperty.call(parsed.lists, 'links')
+          ? parsed.lists.links
+          : this.parseListField(fields.links),
         references: references.length > 0 ? references : undefined,
         summary: fields.summary,
       };
@@ -665,8 +681,15 @@ export class NotesService {
     content += `title: ${note.title}\n`;
     content += `created: ${note.createdAt.toISOString()}\n`;
     content += `updated: ${note.updatedAt.toISOString()}\n`;
-    if (note.tags && note.tags.length > 0) {
-      content += `tags: [${note.tags.join(', ')}]\n`;
+    // Preserve explicit empty-list semantics: write `tags: []` only when the
+    // `tags` property is present on the `note` object. Omit entirely when
+    // `tags` is `undefined` to represent absent metadata.
+    if (Object.prototype.hasOwnProperty.call(note, 'tags')) {
+      if (note.tags && note.tags.length > 0) {
+        content += `tags: [${note.tags.join(', ')}]\n`;
+      } else {
+        content += `tags: []\n`;
+      }
     }
     if (note.links && note.links.length > 0) {
       content += `links: [${note.links.join(', ')}]\n`;
@@ -702,31 +725,6 @@ export class NotesService {
       fileUri,
       new TextEncoder().encode(fileContent),
     );
-  }
-
-  /**
-   * Parses arbitrary frontmatter YAML into a flat key-value record.
-   * Handles basic `key: value` syntax only (no nested structures).
-   * @private
-   */
-  private parseFrontmatterFields(frontmatter: string): Record<string, string> {
-    const fields: Record<string, string> = {};
-
-    for (const rawLine of frontmatter.split('\n')) {
-      const separatorIndex = rawLine.indexOf(':');
-      if (separatorIndex === -1) {
-        continue;
-      }
-
-      const key = rawLine.slice(0, separatorIndex).trim();
-      const value = rawLine.slice(separatorIndex + 1).trim();
-
-      if (key) {
-        fields[key] = value;
-      }
-    }
-
-    return fields;
   }
 
   /**
@@ -884,42 +882,32 @@ export class NotesService {
       }
 
       const frontmatter = normalized.slice(4, endIndex);
-      let id: string | undefined;
-      let title: string | undefined;
-      let links: string[] = [];
+      const parsed = parseFrontmatterDialect(frontmatter, {
+        listKeys: ['links'],
+      });
+      const id = parsed.scalars.id
+        ? this.stripYamlQuotes(parsed.scalars.id)
+        : undefined;
+      const title = parsed.scalars.title
+        ? this.stripYamlQuotes(parsed.scalars.title)
+        : undefined;
+      const rawLinks = Object.prototype.hasOwnProperty.call(
+        parsed.lists,
+        'links',
+      )
+        ? parsed.lists.links
+        : this.parseLinksFromFrontmatterField(parsed.scalars.links, errors);
+      const links = Array.from(
+        new Set(
+          (rawLinks ?? [])
+            .filter((l): l is string => typeof l === 'string')
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0),
+        ),
+      );
 
-      for (const rawLine of frontmatter.split('\n')) {
-        const line = rawLine.trim();
-        if (!line) {
-          continue;
-        }
-
-        const separatorIndex = line.indexOf(':');
-        if (separatorIndex === -1) {
-          continue;
-        }
-
-        const key = line.slice(0, separatorIndex).trim();
-        let value = line.slice(separatorIndex + 1).trim();
-
-        if (
-          (value.startsWith('"') && value.endsWith('"')) ||
-          (value.startsWith("'") && value.endsWith("'"))
-        ) {
-          value = value.slice(1, -1);
-        }
-
-        if (key === 'id' && value) {
-          id = value;
-        }
-
-        if (key === 'title' && value) {
-          title = value;
-        }
-
-        if (key === 'links') {
-          links = this.parseLinksFromFrontmatterField(value, errors);
-        }
+      if (parsed.warnings.length > 0) {
+        errors.push(...parsed.warnings);
       }
 
       const data: FrontmatterIdentity = {

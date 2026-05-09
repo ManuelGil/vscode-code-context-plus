@@ -22,6 +22,7 @@ import {
 import { EXTENSION_DISPLAY_NAME, ExtensionConfig } from '../configs';
 import { showNoWorkspaceFolderError } from '../helpers/error-message.helper';
 import { openDocument } from '../helpers/open-document.helper';
+import { hasTags } from '../helpers/semantic.helper';
 import type { Note } from '../models/note.model';
 import { NotesService } from '../services/notes.service';
 
@@ -63,14 +64,16 @@ export class NotesController {
         placeHolder: l10n.t('tag1, tag2, tag3'),
       });
 
-      const tags = tagsInput
+      const parsedTags = tagsInput
         ? tagsInput
             .split(',')
             .map((tag) => tag.trim())
             .filter((tag) => tag.length > 0)
         : [];
 
-      const note = await this.notesService.createNote(title, '', tags);
+      const tagsParam = parsedTags.length > 0 ? parsedTags : undefined;
+
+      const note = await this.notesService.createNote(title, '', tagsParam);
 
       if (note) {
         await this.openNoteFile(note.filePath);
@@ -784,8 +787,8 @@ export class NotesController {
     return notes.map((note) => ({
       label: note.title,
       description: l10n.t('Last updated: {0}', this.formatDate(note.updatedAt)),
-      detail: note.tags?.length
-        ? l10n.t('Tags: {0}', note.tags.join(', '))
+      detail: hasTags(note)
+        ? l10n.t('Tags: {0}', note.tags!.join(', '))
         : undefined,
       note,
     }));
