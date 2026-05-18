@@ -13,5 +13,6 @@ export enum CommandIds {
   OpenRelatedNotes = 'openRelatedNotes',
   OpenContextForFile = 'openContextForFile',
   OpenContextForLine = 'openContextForLine',
+  OpenContextPreview = 'openContextPreview',
   RefreshNotesExplorer = 'notesExplorer.refreshList',
 }

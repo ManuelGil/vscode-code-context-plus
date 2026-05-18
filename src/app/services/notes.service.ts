@@ -5,8 +5,11 @@ import {
   basenameFromFsPath,
   findFiles,
   getWorkspaceFolderUri,
+  normalizeReferencePath,
+  parseDeclaredReferencesFromFrontmatter,
   parseFrontmatterDialect,
   readFileContent,
+  stripYamlQuotes,
   toPosixPath,
 } from '../helpers';
 import type {
@@ -242,10 +245,7 @@ export class NotesService {
   }> {
     await this.ensureNotesDirectoryExists();
 
-    const targetPath = toPosixPath(fileUri.fsPath);
-    const targetRelative = toPosixPath(
-      workspace.asRelativePath(fileUri, false),
-    );
+    const targetPaths = this.getReferenceTargetPaths(fileUri);
 
     const noteUris = await this.discoverNoteFileUrisThroughContext();
     const notes: { id: string; uri: Uri; title?: string }[] = [];
@@ -253,7 +253,12 @@ export class NotesService {
 
     for (const noteUri of noteUris) {
       const note = await this.readNote(noteUri);
-      if (!note?.references?.length) {
+      if (!note) {
+        continue;
+      }
+
+      const references = note.references ?? [];
+      if (references.length === 0) {
         continue;
       }
 
@@ -263,15 +268,8 @@ export class NotesService {
       }
 
       let matched = false;
-      for (const ref of note.references) {
-        if (
-          this.referenceDeclaresTarget(
-            ref,
-            rootFolderUri,
-            targetPath,
-            targetRelative,
-          )
-        ) {
+      for (const ref of references) {
+        if (this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
           matched = true;
           break;
         }
@@ -308,17 +306,19 @@ export class NotesService {
   async getContextDecorationLinesForFile(fileUri: Uri): Promise<number[]> {
     await this.ensureNotesDirectoryExists();
 
-    const targetPath = toPosixPath(fileUri.fsPath);
-    const targetRelative = toPosixPath(
-      workspace.asRelativePath(fileUri, false),
-    );
+    const targetPaths = this.getReferenceTargetPaths(fileUri);
 
     const noteUris = await this.discoverNoteFileUrisThroughContext();
     const lines = new Set<number>();
 
     for (const noteUri of noteUris) {
       const note = await this.readNote(noteUri);
-      if (!note?.references?.length) {
+      if (!note) {
+        continue;
+      }
+
+      const references = note.references ?? [];
+      if (references.length === 0) {
         continue;
       }
 
@@ -327,15 +327,8 @@ export class NotesService {
         continue;
       }
 
-      for (const ref of note.references) {
-        if (
-          !this.referenceDeclaresTarget(
-            ref,
-            rootFolderUri,
-            targetPath,
-            targetRelative,
-          )
-        ) {
+      for (const ref of references) {
+        if (!this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
           continue;
         }
 
@@ -370,16 +363,18 @@ export class NotesService {
       return out;
     }
 
-    const targetPath = toPosixPath(fileUri.fsPath);
-    const targetRelative = toPosixPath(
-      workspace.asRelativePath(fileUri, false),
-    );
+    const targetPaths = this.getReferenceTargetPaths(fileUri);
 
     const noteUris = await this.discoverNoteFileUrisThroughContext();
 
     for (const noteUri of noteUris) {
       const note = await this.readNote(noteUri);
-      if (!note?.references?.length) {
+      if (!note) {
+        continue;
+      }
+
+      const references = note.references ?? [];
+      if (references.length === 0) {
         continue;
       }
 
@@ -393,15 +388,8 @@ export class NotesService {
         basenameFromFsPath(noteUri.fsPath).replace(/\.md$/i, '');
       const titleTrim = note.title?.trim();
 
-      for (const ref of note.references) {
-        if (
-          !this.referenceDeclaresTarget(
-            ref,
-            rootFolderUri,
-            targetPath,
-            targetRelative,
-          )
-        ) {
+      for (const ref of references) {
+        if (!this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
           continue;
         }
 
@@ -640,7 +628,7 @@ export class NotesService {
       const createdAt = fields.created ? new Date(fields.created) : new Date(0);
       const updatedAt = fields.updated ? new Date(fields.updated) : new Date(0);
 
-      const references = this.parseReferencesFromFrontmatter(frontmatter);
+      const references = parseDeclaredReferencesFromFrontmatter(frontmatter);
 
       if (parsed.warnings.length > 0) {
         for (const warning of parsed.warnings) {
@@ -657,6 +645,7 @@ export class NotesService {
         filePath: fileUri.fsPath,
         createdAt,
         updatedAt,
+        type: fields.type,
         tags: Object.prototype.hasOwnProperty.call(parsed.lists, 'tags')
           ? parsed.lists.tags
           : this.parseListField(fields.tags),
@@ -886,10 +875,10 @@ export class NotesService {
         listKeys: ['links'],
       });
       const id = parsed.scalars.id
-        ? this.stripYamlQuotes(parsed.scalars.id)
+        ? stripYamlQuotes(parsed.scalars.id)
         : undefined;
       const title = parsed.scalars.title
-        ? this.stripYamlQuotes(parsed.scalars.title)
+        ? stripYamlQuotes(parsed.scalars.title)
         : undefined;
       const rawLinks = Object.prototype.hasOwnProperty.call(
         parsed.lists,
@@ -1159,14 +1148,14 @@ export class NotesService {
     }
 
     const frontmatter = this.extractReferencesFrontmatterBlock(noteMarkdown);
-    const rawDeclarations = this.parseReferencesFromFrontmatter(frontmatter);
-    const declarations = rawDeclarations
-      .map((ref) => this.normalizeReferenceDeclaration(ref))
-      .filter((ref): ref is DeclaredReference => ref !== null);
+    const declarations = parseDeclaredReferencesFromFrontmatter(frontmatter);
 
     const resolutionResults = await Promise.all(
       declarations.map(async (ref) => {
-        const uri = this.resolveWorkspaceReferenceUri(rootFolderUri, ref.file);
+        const uri = await this.resolveDeclaredReferenceUri(
+          rootFolderUri,
+          ref.file,
+        );
         if (!uri) {
           return {
             ref,
@@ -1218,79 +1207,6 @@ export class NotesService {
   }
 
   /**
-   * Parses optional `references` list from YAML frontmatter (minimal YAML structure).
-   */
-  private parseReferencesFromFrontmatter(
-    frontmatter: string,
-  ): DeclaredReference[] {
-    const lines = frontmatter.replace(/\r\n/g, '\n').split('\n');
-
-    let sectionStart = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      if (trimmed.startsWith('references:')) {
-        const inline = trimmed.slice('references:'.length).trim();
-        if (inline === '[]') {
-          return [];
-        }
-        sectionStart = i + 1;
-        break;
-      }
-    }
-
-    if (sectionStart === -1) {
-      return [];
-    }
-
-    const refs: DeclaredReference[] = [];
-
-    for (let i = sectionStart; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
-
-      if (trimmed === '') {
-        continue;
-      }
-
-      if (!/^\s/.test(line)) {
-        const nextKey = line.match(/^([a-zA-Z_][\w-]*)\s*:/);
-        if (nextKey && nextKey[1] !== 'references') {
-          break;
-        }
-      }
-
-      const fileMatch = line.match(/^\s*-\s*file:\s*(.+)$/);
-      if (fileMatch) {
-        const rawPath = fileMatch[1].trim();
-        const filePath = this.stripYamlQuotes(rawPath);
-        if (typeof filePath === 'string' && filePath.trim().length > 0) {
-          refs.push({ file: filePath.trim() });
-        }
-        continue;
-      }
-
-      const lineMatch = line.match(/^\s+line:\s*(.+)$/);
-      if (lineMatch && refs.length > 0) {
-        const n = Number.parseInt(lineMatch[1].trim(), 10);
-        const last = refs[refs.length - 1];
-        const parsedLine =
-          typeof n === 'number' &&
-          Number.isFinite(n) &&
-          Number.isInteger(n) &&
-          n > 0
-            ? n
-            : undefined;
-        if (parsedLine !== undefined) {
-          last.line = parsedLine;
-        }
-        continue;
-      }
-    }
-
-    return refs;
-  }
-
-  /**
    * Extracts the YAML frontmatter content (between `---` markers) from a Markdown file.
    */
   private extractReferencesFrontmatterBlock(markdown: string): string {
@@ -1308,44 +1224,8 @@ export class NotesService {
   }
 
   /**
-   * Drops invalid reference rows (bad `file` or line). Never throws.
-   */
-  private normalizeReferenceDeclaration(
-    ref: DeclaredReference,
-  ): DeclaredReference | null {
-    if (!ref.file || typeof ref.file !== 'string') {
-      return null;
-    }
-    const file = ref.file.trim();
-    if (!file) {
-      return null;
-    }
-    const line =
-      typeof ref.line === 'number' &&
-      Number.isFinite(ref.line) &&
-      Number.isInteger(ref.line) &&
-      ref.line > 0
-        ? ref.line
-        : undefined;
-    return { file, line };
-  }
-
-  /**
    * Removes surrounding YAML quote characters (`"` or `'`) if present.
    */
-  private stripYamlQuotes(value: string): string {
-    if (typeof value !== 'string') {
-      return '';
-    }
-    const trimmed = value.trim();
-    if (
-      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-      (trimmed.startsWith("'") && trimmed.endsWith("'"))
-    ) {
-      return trimmed.slice(1, -1).trim();
-    }
-    return trimmed;
-  }
 
   /**
    * 1-based line from a reference row; missing or invalid line means file-level (`1`).
@@ -1364,27 +1244,37 @@ export class NotesService {
   private referenceDeclaresTarget(
     ref: DeclaredReference,
     rootFolderUri: Uri,
-    targetPath: string,
-    targetRelative: string,
+    targetPaths: readonly string[],
   ): boolean {
-    const decl = toPosixPath(ref.file.trim());
-    if (decl === targetPath || decl === targetRelative) {
-      return true;
+    const decl = normalizeReferencePath(ref.file);
+    const normalizedTargets = targetPaths.map((p) => normalizeReferencePath(p));
+    if (decl) {
+      if (normalizedTargets.includes(decl)) {
+        return true;
+      }
     }
-    const resolved = this.resolveWorkspaceReferenceUri(rootFolderUri, ref.file);
-    return Boolean(resolved && toPosixPath(resolved.fsPath) === targetPath);
+
+    return this.resolveWorkspaceReferenceUris(rootFolderUri, ref.file).some(
+      (resolved) => {
+        const rp = normalizeReferencePath(toPosixPath(resolved.fsPath));
+        return (
+          targetPaths.includes(toPosixPath(resolved.fsPath)) ||
+          normalizedTargets.includes(rp)
+        );
+      },
+    );
   }
 
   /**
-   * Resolves a reference path to an absolute `Uri`.
+   * Resolves a reference path to candidate absolute `Uri`s without checking file existence.
    */
-  private resolveWorkspaceReferenceUri(
+  private resolveWorkspaceReferenceUris(
     workspaceRoot: Uri,
     fileRef: string,
-  ): Uri | null {
+  ): Uri[] {
     const trimmedRaw = fileRef.trim();
     if (!trimmedRaw) {
-      return null;
+      return [];
     }
 
     const slashPath = trimmedRaw.replace(/\\/g, '/');
@@ -1393,13 +1283,15 @@ export class NotesService {
 
     if (isAbsolutePosix || isAbsoluteWin) {
       try {
-        return Uri.file(trimmedRaw);
+        return [Uri.file(trimmedRaw)];
       } catch {
-        return null;
+        return [];
       }
     }
 
     const segments = slashPath.split('/').filter((s) => s !== '' && s !== '.');
+    const candidates: Uri[] = [];
+
     try {
       let uri = workspaceRoot;
       for (const segment of segments) {
@@ -1408,9 +1300,74 @@ export class NotesService {
             ? Uri.joinPath(uri, '..')
             : Uri.joinPath(uri, segment);
       }
-      return uri;
+      candidates.push(uri);
     } catch {
-      return null;
+      // Ignore resolution failures for this base.
     }
+
+    if (this.notesDir) {
+      try {
+        let uri = this.notesDir;
+        for (const segment of segments) {
+          uri =
+            segment === '..'
+              ? Uri.joinPath(uri, '..')
+              : Uri.joinPath(uri, segment);
+        }
+        candidates.push(uri);
+      } catch {
+        // Ignore resolution failures for the notes directory base.
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Resolves a reference path to the first existing absolute `Uri`, preferring the workspace root.
+   */
+  private async resolveDeclaredReferenceUri(
+    workspaceRoot: Uri,
+    fileRef: string,
+  ): Promise<Uri | null> {
+    const candidates = this.resolveWorkspaceReferenceUris(
+      workspaceRoot,
+      fileRef,
+    );
+
+    for (const candidate of candidates) {
+      try {
+        await workspace.fs.stat(candidate);
+        return candidate;
+      } catch {
+        // Try the next candidate.
+      }
+    }
+
+    return candidates[0] ?? null;
+  }
+
+  /**
+   * Returns the absolute and relative target paths that may identify a file reference.
+   */
+  private getReferenceTargetPaths(fileUri: Uri): string[] {
+    const targetPaths = new Set<string>();
+    const absolutePath = toPosixPath(fileUri.fsPath);
+
+    targetPaths.add(absolutePath);
+    targetPaths.add(toPosixPath(workspace.asRelativePath(fileUri, false)));
+
+    if (this.notesDir) {
+      const notesDirPath = toPosixPath(this.notesDir.fsPath).replace(/\/$/, '');
+
+      if (
+        absolutePath === notesDirPath ||
+        absolutePath.startsWith(`${notesDirPath}/`)
+      ) {
+        targetPaths.add(absolutePath.slice(notesDirPath.length + 1));
+      }
+    }
+
+    return [...targetPaths];
   }
 }

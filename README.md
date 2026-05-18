@@ -6,162 +6,329 @@
 
 > See where context exists in your code.
 
-You already write notes and document decisions.
+Code explains *what* the system does.
 
-But when you are inside your code, that context is not visible.
+But understanding usually lives somewhere else:
 
-CodeContext+ shows you where knowledge exists, directly in your editor.
+- debugging notes
+- architectural decisions
+- trade-offs
+- investigations
+- migration plans
+- implementation reasoning
+
+CodeContext+ keeps that context attached directly to the code where it matters.
+
+Instead of searching through documents, pull requests, or scattered notes, context becomes visible directly inside your editor.
 
 <img src="https://raw.githubusercontent.com/ManuelGil/vscode-code-context-plus/refs/heads/main/assets/screenshot-1.png" alt="Context appears directly in your code" />
 
-## How it works
-
-CodeContext+ connects your notes with your code.
-
-Each indicator represents real notes linked to that part of the code.
-
-A single line can have multiple related notes, reflecting different decisions, fixes, or explanations.
-
-<img src="https://raw.githubusercontent.com/ManuelGil/vscode-code-context-plus/refs/heads/main/assets/screenshot-2.png" alt="Multiple notes connected to the same line" />
-
-## Navigate context
-
-When you see context, you can open it immediately.
-
-Jump directly from your code to the notes that explain that specific line.
-
-<img src="https://raw.githubusercontent.com/ManuelGil/vscode-code-context-plus/refs/heads/main/assets/screenshot-3.png" alt="Open related notes from your code" />
-
-## Project Overview
-
-CodeContext+ links notes to specific files and lines in your code.
-
-This allows context to be discovered and opened directly from where it is relevant.
-
-## Workflow
-
-1. Create a note
-2. Link it to other notes
-3. Add references to code (file and line)
-4. Open context directly from your code
-
 ## The Problem
 
-Code changes quickly, but context does not.
+Development context disappears quickly.
 
-Decisions, explanations, and trade-offs get scattered across comments, documents, pull requests, and memory.
+A line of code may have:
 
-When you need them, they are hard to find.
+- a bug investigation,
+- a refactor discussion,
+- an architectural decision,
+- and a failed experiment behind it.
 
-You don’t just need to navigate files.
-You need to navigate knowledge.
+But once the work is finished, that knowledge gets fragmented across:
 
-## What This Is
+- markdown files,
+- PR discussions,
+- tickets,
+- chats,
+- and memory.
 
-CodeContext+ connects notes to specific files and lines through structured references.
+When another developer revisits the code later, the context is gone.
 
-It allows developers to see and navigate context directly from files and lines.
+## What CodeContext+ Does
 
-## Key Concepts
+CodeContext+ connects contextual notes directly to files and lines in your workspace.
 
-### Notes
+When context exists for the code you are reading:
 
-Markdown files that capture context:
+- indicators appear inside the editor,
+- related notes can be previewed,
+- context can be opened immediately,
+- and related context stays connected through references and links.
 
-- decisions
-- explanations
-- debugging insights
-- architecture notes
+The goal is simple:
 
-### Links
-
-Structured relationships between notes.
-
-They define how knowledge is connected.
-
-### Backlinks
-
-Automatically derived relationships.
-
-They let you discover where a note is referenced from.
-
-### References
-
-Connections between notes and code:
-
-```yaml
-references:
-  - file: src/auth/service.ts
-    line: 42
+```text
+make context visible exactly where development happens
 ```
-
-## What Makes It Different
-
-- Works directly inside your code (no context switching)
-- Connects notes as a system, not isolated documents
-- Makes knowledge navigable, not just stored
-
-## How It Feels
-
-Create a note.
-Connect it.
-Follow the context.
-
-Instead of searching, you move through understanding.
-
-## Core Features
-
-- See context directly in your code (💡 indicators)
-- Open related notes from a specific line
-- Connect code to knowledge through references
-- Navigate links and backlinks between notes
-- Explore related notes from a unified view
 
 ## Example
 
+Imagine you are reading this code:
+
 ```ts
 // TODO: fix token expiration
+export class AuthService {
+  login() {
+    ...
+  }
+}
 ```
 
-This line might be connected to:
+That line may already have important context attached to it:
 
-- a bug investigation
-- a refactor note
-- a design decision
+- why the bug exists,
+- what was tried before,
+- related architectural decisions,
+- or migration concerns.
 
-Instead of searching, you see that context immediately - directly in your code.
-
-## Installation
-
-1. Install from the VS Code Marketplace
-2. Open a project
-3. Start creating notes
-
-## Getting Started
-
-Create a note and add a reference:
+A contextual note might look like this:
 
 ```yaml
-id: auth-bug
-title: Auth Bug
+id: auth-token-expiration
+title: Token expiration investigation
+
 references:
-  - file: src/auth/service.ts
+  - src/auth/auth.service.ts#1
+
+links:
+  - auth-refactor
+  - jwt-strategy
+
+type: bug
+
+summary: >
+  Login flow accepts stale tokens during session refresh.
+  Previous fixes caused invalid session reuse.
+```
+
+When you open the file:
+
+- context indicators appear automatically,
+- the note becomes discoverable from the editor,
+- related notes can be opened immediately,
+- and connected context stays navigable.
+
+<img src="https://raw.githubusercontent.com/ManuelGil/vscode-code-context-plus/refs/heads/main/assets/screenshot-2.png" alt="Multiple notes connected to the same line" />
+
+## Context Directly Inside Your Workflow
+
+CodeContext+ is built around active code locality.
+
+The extension focuses on:
+
+- the file you are reading,
+- the line you are editing,
+- nearby contextual references,
+- and recent contextual navigation.
+
+It does not try to semanticize the entire repository.
+
+Context stays:
+
+- explicit,
+- lightweight,
+- deterministic,
+- and attached directly to your workflow.
+
+## Runtime Context Surfaces
+
+CodeContext+ exposes contextual information directly inside VS Code through lightweight runtime surfaces.
+
+These include:
+
+- inline context indicators,
+- contextual hover previews,
+- transient context previews,
+- line-level contextual navigation,
+- related-note exploration,
+- backlinks,
+- continuity breadcrumbs,
+- and contextual TreeView projections.
+
+The result is a workflow where context becomes visible without interrupting development flow.
+
+<img src="https://raw.githubusercontent.com/ManuelGil/vscode-code-context-plus/refs/heads/main/assets/screenshot-3.png" alt="Open related notes from your code" />
+
+## References
+
+References create explicit connections between notes and code.
+
+Compact references:
+
+```yaml
+references:
+  - src/auth/auth.service.ts#42
+```
+
+Structured references:
+
+```yaml
+references:
+  - file: src/auth/auth.service.ts
     line: 42
 ```
 
-Open the file → the context appears automatically.
+Both formats are supported and normalized into the same deterministic runtime model.
+
+## Links and Backlinks
+
+Notes can also connect to other notes.
+
+Example:
+
+```yaml
+id: auth-refactor
+
+links:
+  - jwt-strategy
+  - token-storage
+```
+
+This allows related context to remain connected:
+
+- investigations,
+- decisions,
+- migrations,
+- debugging sessions,
+- and architectural reasoning.
+
+Backlinks are derived automatically, making contextual navigation bidirectional.
+
+## Continuity Instead of Searching
+
+CodeContext+ is designed around contextual continuity.
+
+As you navigate through files and notes, the extension keeps recent context locally available through:
+
+- contextual previews,
+- continuity breadcrumbs,
+- recency prioritization,
+- and lightweight contextual memory.
+
+The goal is not to create a knowledge graph.
+
+The goal is to reduce contextual interruption during development.
+
+## Core Concepts
+
+### Notes
+
+Markdown files containing contextual knowledge.
+
+Examples:
+
+- bug investigations,
+- architecture notes,
+- debugging sessions,
+- migration plans,
+- implementation reasoning.
+
+### References
+
+Explicit links between notes and code.
+
+References activate contextual surfaces directly inside the editor.
+
+### Links
+
+Connections between related notes.
+
+They preserve relationships between investigations, decisions, and implementation context.
+
+### Backlinks
+
+Automatically derived reverse relationships between notes.
+
+They make contextual exploration navigable in both directions.
 
 ## Philosophy
 
-Code is only part of the system.
+CodeContext+ follows a few core principles:
 
-Understanding comes from the connections between:
+#### Explicit Context
 
-- code
-- decisions
-- explanations
+Context is explicitly attached to code through references.
 
-CodeContext+ helps you see those connections.
+Nothing is inferred automatically.
+
+#### Locality First
+
+The runtime focuses on:
+
+- the current file,
+- the current line,
+- nearby context,
+- and recent navigation.
+
+Not repository-wide semantic indexing.
+
+#### Deterministic Behavior
+
+Context resolution is predictable and explainable.
+
+The extension does not rely on:
+
+- AI inference,
+- embeddings,
+- hidden relationships,
+- or probabilistic matching.
+
+#### Lightweight Semantics
+
+The system intentionally keeps semantics bounded.
+
+The goal is operational clarity, not metadata complexity.
+
+## Getting Started
+
+Create a contextual note:
+
+```yaml
+id: auth-bug
+title: Login Session Bug
+
+references:
+  - src/auth/auth.service.ts#1
+
+type: bug
+
+summary: >
+  Session refresh may reuse stale authentication tokens.
+```
+
+Open the referenced file.
+
+Context now becomes available directly from the editor.
+
+## What CodeContext+ Is Not
+
+CodeContext+ is not:
+
+- a PKM system,
+- a graph database,
+- a semantic indexing engine,
+- an AI assistant,
+- or a repository-wide ontology layer.
+
+It is a deterministic contextual runtime designed to keep development context attached to active code.
+
+## Installation
+
+1. Install CodeContext+ from the VS Code Marketplace
+2. Open a workspace
+3. Create contextual notes
+4. Add references to files or lines
+5. Navigate context directly from your editor
+
+## Why This Matters
+
+Most development knowledge disappears after implementation.
+
+Code remains.
+Context does not.
+
+CodeContext+ helps preserve that context directly where software development actually happens:
+inside the codebase itself.
 
 ## Contributing
 

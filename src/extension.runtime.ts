@@ -441,6 +441,20 @@ export class ExtensionRuntime {
     );
     this.context.subscriptions.push(disposableOpenContextLine);
 
+    const disposableOpenContextPreview = commands.registerCommand(
+      `${EXTENSION_ID}.${CommandIds.OpenContextPreview}`,
+      (uriArg?: unknown, line?: unknown) => {
+        if (!this.isExtensionEnabled()) {
+          return;
+        }
+        return this.notesController?.openContextPreview(
+          uriArg,
+          typeof line === 'number' ? line : undefined,
+        );
+      },
+    );
+    this.context.subscriptions.push(disposableOpenContextPreview);
+
     const notesTreeProvider = new NotesTreeProvider(this.notesService);
     notesTreeProvider.startWatching();
 

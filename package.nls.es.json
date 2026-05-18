@@ -2,7 +2,7 @@
 	"codeContextPlus.enable.description": "Habilitar o deshabilitar la extensión",
 	"codeContextPlus.changeWorkspace.title": "Cambiar carpeta de espacio de trabajo",
 	"codeContextPlus.notes.notesFolder.description": "Carpeta (relativa al espacio de trabajo) donde CodeContext+ guarda notas y archivos generados.",
-	"codeContextPlus.notesExplorer.title": "Notas",
+	"codeContextPlus.notesExplorer.title": "Contexto activo",
 	"codeContextPlus.createProjectNote.title": "Crear nota de proyecto",
 	"codeContextPlus.openProjectNote.title": "Abrir nota de proyecto",
 	"codeContextPlus.insertNoteLink.title": "Insertar enlace a nota",

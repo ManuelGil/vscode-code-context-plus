@@ -20,11 +20,15 @@ import {
 } from 'vscode';
 
 import { EXTENSION_DISPLAY_NAME, ExtensionConfig } from '../configs';
-import { showNoWorkspaceFolderError } from '../helpers/error-message.helper';
-import { openDocument } from '../helpers/open-document.helper';
-import { hasTags } from '../helpers/semantic.helper';
-import type { Note } from '../models/note.model';
-import { NotesService } from '../services/notes.service';
+import {
+  getTrail,
+  hasTags,
+  openDocument,
+  pushContext,
+  showNoWorkspaceFolderError,
+} from '../helpers';
+import type { Note } from '../models';
+import { NotesService } from '../services';
 
 /**
  * Handles VS Code UI flows for project notes (commands: create, open, insert link).
@@ -295,7 +299,7 @@ export class NotesController {
         return;
       }
 
-      await openDocument(selected.uri);
+      await this.openNoteUri(selected.uri);
     } catch (error) {
       console.error('Error opening linked note:', error);
       window.showErrorMessage(
@@ -443,7 +447,7 @@ export class NotesController {
         return;
       }
 
-      await openDocument(selected.uri);
+      await this.openNoteUri(selected.uri);
     } catch (error) {
       console.error('Error opening backlinks:', error);
       window.showErrorMessage(
@@ -535,7 +539,7 @@ export class NotesController {
         return;
       }
 
-      await openDocument(selected.uri);
+      await this.openNoteUri(selected.uri);
     } catch (error) {
       console.error('Error opening related notes:', error);
       window.showErrorMessage(
@@ -546,6 +550,9 @@ export class NotesController {
 
   /**
    * Lists notes that reference the active editor file (frontmatter `references`) and opens the selection.
+   *
+   * If exactly one note exists for the file, opens it directly without showing QuickPick.
+   * If multiple notes exist, shows QuickPick to select.
    */
   public async openContextForFile(): Promise<void> {
     try {
@@ -564,6 +571,12 @@ export class NotesController {
 
       if (result.notes.length === 0) {
         window.showInformationMessage(l10n.t('No context found for this file'));
+        return;
+      }
+
+      // If exactly one note exists, open it directly
+      if (result.notes.length === 1) {
+        await this.openNoteUri(result.notes[0].uri);
         return;
       }
 
@@ -586,7 +599,7 @@ export class NotesController {
         return;
       }
 
-      await openDocument(selected.uri);
+      await this.openNoteUri(selected.uri);
     } catch (error) {
       console.error('Error opening context for file:', error);
       window.showErrorMessage(
@@ -597,6 +610,9 @@ export class NotesController {
 
   /**
    * Opens notes that reference the given file at a 1-based line (QuickPick); falls back to any file-level references.
+   *
+   * If exactly one note exists (at line or file level), opens it directly without showing QuickPick.
+   * If multiple notes exist, shows QuickPick to select.
    */
   public async openContextForLine(
     uriArg?: unknown,
@@ -634,6 +650,12 @@ export class NotesController {
         return;
       }
 
+      // If exactly one note exists, open it directly
+      if (notes.length === 1) {
+        await this.openNoteUri(notes[0].uri);
+        return;
+      }
+
       const sorted = [...notes].sort((a, b) => {
         const aLabel = (a.title ?? a.id).toLowerCase();
         const bLabel = (b.title ?? b.id).toLowerCase();
@@ -657,11 +679,80 @@ export class NotesController {
         return;
       }
 
-      await openDocument(selected.uri);
+      await this.openNoteUri(selected.uri);
     } catch (error) {
       console.error('Error opening context for line:', error);
       window.showErrorMessage(
         l10n.t('An error occurred while opening context for this line'),
+      );
+    }
+  }
+
+  /**
+   * Shows a transient preview QuickPick for notes referencing the given file/line.
+   * Does not open documents automatically; selection opens the note in preview mode.
+   */
+  public async openContextPreview(
+    uriArg?: unknown,
+    line?: number,
+  ): Promise<void> {
+    try {
+      const fileUri = this.parseCommandUri(uriArg);
+      if (
+        !fileUri ||
+        typeof line !== 'number' ||
+        !Number.isInteger(line) ||
+        line < 1
+      ) {
+        return;
+      }
+
+      const atLine = await this.notesService.getNotesByFileReferenceAtLine(
+        fileUri,
+        line,
+      );
+      let notes = atLine.notes;
+      const usedLineContext = notes.length > 0;
+      if (!usedLineContext) {
+        notes = (await this.notesService.getNotesByFileReference(fileUri))
+          .notes;
+      }
+
+      if (notes.length === 0) {
+        window.showInformationMessage(l10n.t('No context found for this file'));
+        return;
+      }
+
+      const items = await Promise.all(
+        notes.map(async (n) => {
+          const note = await this.notesService.getNote(n.uri);
+          return {
+            label: n.title?.trim() ? n.title : n.id,
+            description: note?.summary?.trim()
+              ? note!.summary!.trim()
+              : undefined,
+            detail: `${workspace.asRelativePath(n.uri, false)}${note?.type ? ` • ${note.type}` : ''}`,
+            uri: n.uri,
+          };
+        }),
+      );
+
+      const placeHolder = usedLineContext
+        ? l10n.t('Preview context for line {0}', String(line))
+        : l10n.t('Preview context for this file');
+
+      const selected = await window.showQuickPick(items, {
+        placeHolder,
+      });
+      if (!selected) {
+        return;
+      }
+
+      await this.openNoteFile(selected.uri.fsPath);
+    } catch (error) {
+      console.error('Error opening context preview:', error);
+      window.showErrorMessage(
+        l10n.t('An error occurred while previewing context'),
       );
     }
   }
@@ -685,7 +776,37 @@ export class NotesController {
    * @private
    */
   private async openNoteFile(filePath: string): Promise<void> {
+    try {
+      const uri = Uri.file(filePath);
+      const note = await this.notesService.getNote(uri);
+      if (note) {
+        pushContext({ id: note.id, uri, title: note.title, type: note.type });
+        const trail = getTrail(5)
+          .map((t) => t.id)
+          .join(' ← ');
+        if (trail) {
+          // transient breadcrumb in status bar
+          window.setStatusBarMessage(`Context trail: ${trail}`, 5000);
+        }
+      }
+    } catch {
+      // ignore continuity failures
+    }
     await openDocument(filePath);
+  }
+
+  private async openNoteUri(uri: Uri): Promise<void> {
+    const note = await this.notesService.getNote(uri);
+    if (note) {
+      pushContext({ id: note.id, uri, title: note.title, type: note.type });
+      const trail = getTrail(5)
+        .map((t) => t.id)
+        .join(' ← ');
+      if (trail) {
+        window.setStatusBarMessage(`Context trail: ${trail}`, 5000);
+      }
+    }
+    await openDocument(uri);
   }
 
   /**

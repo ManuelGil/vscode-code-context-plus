@@ -1,3 +1,5 @@
+import { stripYamlQuotes } from './normalization.helper';
+
 export type FrontmatterDialectParseResult = {
   /** Top-level `key: value` pairs (value is the raw string after `:`). */
   scalars: Record<string, string>;
@@ -16,17 +18,6 @@ export type ParseFrontmatterDialectOptions = {
 };
 
 const DEFAULT_LIST_KEYS = ['tags', 'links'] as const;
-
-function stripYamlQuotes(value: string): string {
-  const trimmed = value.trim();
-  if (
-    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
-    (trimmed.startsWith("'") && trimmed.endsWith("'"))
-  ) {
-    return trimmed.slice(1, -1).trim();
-  }
-  return trimmed;
-}
 
 function parseInlineBracketList(raw: string): string[] {
   const trimmed = raw.trim();

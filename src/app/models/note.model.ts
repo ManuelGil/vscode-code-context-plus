@@ -43,7 +43,12 @@ export type NotesIdentityValidationWarning = {
 /** Single `references:` row from YAML frontmatter (paths not yet resolved to workspace URIs). */
 export type DeclaredReference = {
   file: string;
+  /** Single 1-based line number for precise reference. */
   line?: number;
+  /** Optional inclusive end line for range references (1-based). */
+  endLine?: number;
+  /** Optional lightweight symbol identifier (compatibility for compact syntax only). */
+  symbol?: string;
 };
 
 /** Markdown note payload loaded from disk (including fields parsed from frontmatter). */
@@ -57,6 +62,7 @@ export interface Note {
   tags?: string[];
   links?: string[];
   references?: DeclaredReference[];
+  type?: string;
   summary?: string;
 }
 
