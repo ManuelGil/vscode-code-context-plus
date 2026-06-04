@@ -141,6 +141,23 @@ export function parseDeclaredReferencesFromFrontmatter(
       }
       continue;
     }
+
+    const endLineMatch = line.match(/^\s+endLine:\s*(.+)$/);
+    if (endLineMatch && refs.length > 0) {
+      const n = Number.parseInt(endLineMatch[1].trim(), 10);
+      const last = refs[refs.length - 1];
+      const parsedEndLine =
+        typeof n === 'number' &&
+        Number.isFinite(n) &&
+        Number.isInteger(n) &&
+        n > 0
+          ? n
+          : undefined;
+      if (parsedEndLine !== undefined) {
+        last.endLine = parsedEndLine;
+      }
+      continue;
+    }
   }
 
   return refs

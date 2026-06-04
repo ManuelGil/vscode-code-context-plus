@@ -57,21 +57,13 @@ export interface Note {
   title: string;
   content: string;
   filePath: string;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt?: Date;
+  updatedAt?: Date;
   tags?: string[];
   links?: string[];
   references?: DeclaredReference[];
   type?: string;
   summary?: string;
-}
-
-/** Describes an editor-insertable Markdown link targeting another note or location. */
-export interface NoteLink {
-  notePath: string;
-  noteTitle: string;
-  targetFilePath?: string;
-  targetLine?: number;
 }
 
 // -----------------------------------------------------------------------------

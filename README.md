@@ -6,7 +6,7 @@
 
 > See where context exists in your code.
 
-Code explains *what* the system does.
+Code explains _what_ the system does.
 
 But understanding usually lives somewhere else:
 
@@ -169,6 +169,14 @@ references:
 ```
 
 Both formats are supported and normalized into the same deterministic runtime model.
+
+### Capture references directly from the editor
+
+- Place your cursor on the file and line that needs historical context.
+- Run **CodeContext+: Add reference for current location**.
+- Pick the note that should store the reference and the command appends the normalized `file`/`line` entry to its frontmatter.
+
+This avoids manual YAML editing while preserving the explicit reference model.
 
 ## Links and Backlinks
 
@@ -362,8 +370,8 @@ See also the list of [contributors](https://github.com/ManuelGil/vscode-code-con
 
 ## Follow Me
 
-- **GitHub**: [![GitHub followers](https://img.shields.io/github/followers/ManuelGil?style=for-the-badge\&logo=github)](https://github.com/ManuelGil)
-- **X (formerly Twitter)**: [![X Follow](https://img.shields.io/twitter/follow/imgildev?style=for-the-badge\&logo=x)](https://twitter.com/imgildev)
+- **GitHub**: [![GitHub followers](https://img.shields.io/github/followers/ManuelGil?style=for-the-badge&logo=github)](https://github.com/ManuelGil)
+- **X (formerly Twitter)**: [![X Follow](https://img.shields.io/twitter/follow/imgildev?style=for-the-badge&logo=x)](https://twitter.com/imgildev)
 
 ## Other Extensions
 

@@ -5,7 +5,7 @@ export enum CommandIds {
   ChangeWorkspace = 'changeWorkspace',
   CreateProjectNote = 'createProjectNote',
   OpenProjectNote = 'openProjectNote',
-  InsertNoteLink = 'insertNoteLink',
+  AddRelatedNote = 'addRelatedNote',
   GoToNoteById = 'goToNoteById',
   OpenLinkedNote = 'openLinkedNote',
   OpenReference = 'openReference',
@@ -15,4 +15,5 @@ export enum CommandIds {
   OpenContextForLine = 'openContextForLine',
   OpenContextPreview = 'openContextPreview',
   RefreshNotesExplorer = 'notesExplorer.refreshList',
+  AddReferenceForLocation = 'addReferenceForLocation',
 }

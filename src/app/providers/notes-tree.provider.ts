@@ -77,7 +77,6 @@ export class NotesTreeProvider implements TreeDataProvider<NotesTreeNode> {
     this.watcher?.dispose();
     this.watcher = undefined;
 
-    await this.notesService.ensureNotesDirectoryExists();
     const dir = this.notesService.getNotesDirectoryUri();
     if (!dir) {
       return;

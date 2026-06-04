@@ -385,8 +385,14 @@ export class ExtensionRuntime {
         ),
       },
       {
-        id: CommandIds.InsertNoteLink,
-        handler: withEnabledGuard(() => this.notesController?.insertNoteLink()),
+        id: CommandIds.AddRelatedNote,
+        handler: withEnabledGuard(() => this.notesController?.addRelatedNote()),
+      },
+      {
+        id: CommandIds.AddReferenceForLocation,
+        handler: withEnabledGuard(() =>
+          this.notesController?.addReferenceForLocation(),
+        ),
       },
       {
         id: CommandIds.GoToNoteById,

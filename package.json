@@ -97,8 +97,13 @@
 				"category": "CodeContext+"
 			},
 			{
-				"command": "codeContextPlus.insertNoteLink",
-				"title": "%codeContextPlus.insertNoteLink.title%",
+				"command": "codeContextPlus.addRelatedNote",
+				"title": "%codeContextPlus.addRelatedNote.title%",
+				"category": "CodeContext+"
+			},
+			{
+				"command": "codeContextPlus.addReferenceForLocation",
+				"title": "%codeContextPlus.addReferenceForLocation.title%",
 				"category": "CodeContext+"
 			},
 			{

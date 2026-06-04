@@ -135,51 +135,66 @@ export class NotesController {
   }
 
   /**
-   * Inserts a Markdown link to a chosen note at the current cursor in the active editor.
+   * Appends the ID of a selected note to the current note's `links` frontmatter.
    */
-  public async insertNoteLink(): Promise<void> {
-    try {
-      const activeEditor = this.getActiveEditorOrWarn();
-      if (!activeEditor) {
-        return;
-      }
-
-      const notes = await this.notesService.getAllNotes();
-
-      if (await this.handleEmptyNotesAndMaybeCreate(notes)) {
-        return;
-      }
-
-      const items = this.toNoteQuickPickItems(notes);
-
-      const selected = await window.showQuickPick(items, {
-        placeHolder: l10n.t('Select a note to link'),
-      });
-
-      if (!selected) {
-        return;
-      }
-
-      const currentFilePath = activeEditor.document.uri.fsPath;
-      const currentPosition = activeEditor.selection.active.line;
-
-      const noteLink = this.notesService.createNoteLink(
-        selected.note,
-        currentFilePath,
-        currentPosition,
-      );
-
-      const markdownLink = this.notesService.formatNoteLinkMarkdown(noteLink);
-
-      activeEditor.edit((editBuilder) => {
-        editBuilder.insert(activeEditor.selection.active, markdownLink);
-      });
-    } catch (error) {
-      console.error('Error inserting note link:', error);
-      window.showErrorMessage(
-        l10n.t('An error occurred while inserting the note link'),
-      );
+  public async addRelatedNote(): Promise<void> {
+    const activeEditor = this.getActiveEditorOrWarn();
+    if (!activeEditor) {
+      return;
     }
+
+    const currentNote = await this.notesService.getNote(
+      activeEditor.document.uri,
+    );
+
+    const currentNoteId = currentNote?.id?.trim();
+    if (!currentNote || !currentNoteId) {
+      return;
+    }
+
+    const selectableNotes = (await this.notesService.getAllNotes()).filter(
+      (note) => {
+        const candidateId = note.id?.trim();
+        return candidateId && candidateId !== currentNoteId;
+      },
+    );
+
+    const selected = await window.showQuickPick(
+      this.toNoteQuickPickItems(selectableNotes),
+    );
+
+    const targetNoteId = selected?.note.id?.trim();
+    if (!targetNoteId) {
+      return;
+    }
+
+    await this.notesService.addLinkToNote(currentNote, targetNoteId);
+  }
+
+  /**
+   * Appends a code reference for the active editor location to a selected note.
+   */
+  public async addReferenceForLocation(): Promise<void> {
+    const activeEditor = this.getActiveEditorOrWarn();
+    if (!activeEditor) {
+      return;
+    }
+
+    const notes = await this.notesService.getAllNotes();
+    const selected = await window.showQuickPick(
+      this.toNoteQuickPickItems(notes),
+    );
+    if (!selected) {
+      return;
+    }
+
+    const fileUri = activeEditor.document.uri;
+    const currentLine = activeEditor.selection.active.line + 1;
+    await this.notesService.addReferenceForLocation(
+      selected.note,
+      fileUri,
+      currentLine,
+    );
   }
 
   /**
@@ -758,20 +773,6 @@ export class NotesController {
   }
 
   /**
-   * Formats a date for user-facing UI (locale-aware, includes time).
-   * @private
-   */
-  private formatDate(date: Date): string {
-    return date.toLocaleDateString(undefined, {
-      year: 'numeric',
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  }
-
-  /**
    * Opens a note file by path in the default editor view.
    * @private
    */
@@ -905,13 +906,23 @@ export class NotesController {
    * @private
    */
   private toNoteQuickPickItems(notes: Note[]) {
-    return notes.map((note) => ({
-      label: note.title,
-      description: l10n.t('Last updated: {0}', this.formatDate(note.updatedAt)),
-      detail: hasTags(note)
-        ? l10n.t('Tags: {0}', note.tags!.join(', '))
-        : undefined,
-      note,
-    }));
+    return notes.map((note) => {
+      const hasTitle = note.title?.trim().length;
+      const label = hasTitle ? note.title : note.id;
+      const relativePath = workspace.asRelativePath(note.filePath, false);
+      const description =
+        relativePath && relativePath.trim().length > 0
+          ? relativePath
+          : note.filePath;
+
+      return {
+        label,
+        description,
+        detail: hasTags(note)
+          ? l10n.t('Tags: {0}', note.tags!.join(', '))
+          : undefined,
+        note,
+      };
+    });
   }
 }

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- New "Add reference for current location" command to append the active editor file/line to existing notes without editing frontmatter manually.
+- New "Add related note" command to append an existing note's ID to the active note's `links` metadata via QuickPick.
+
+### Changed
+
+- Surface note summaries, types, and tags inside existing context QuickPick commands so selecting the right note no longer requires opening each file.
+
 ## [1.2.0] - 2026-05-18
 
 ### Added

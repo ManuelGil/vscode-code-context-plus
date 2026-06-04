@@ -13,20 +13,26 @@ import {
   toPosixPath,
 } from '../helpers';
 import type {
-  BacklinkSourcesResult,
   DeclaredReference,
   FrontmatterIdentity,
   Note,
-  NoteLink,
-  NoteReference,
   NotesIdentityValidationError,
   NotesIdentityValidationResult,
   NotesIdentityValidationWarning,
   OperationContext,
-  ResolvedLinksResult,
-  ResolvedReferencesResult,
   SafeParseResult,
 } from '../models/note.model';
+
+type FrontmatterEntryRange = {
+  key: string;
+  start: number;
+  end: number;
+};
+
+type FrontmatterSnapshot = {
+  raw: string;
+  entries: FrontmatterEntryRange[];
+};
 
 /**
  * Reads and writes project notes as Markdown files with YAML frontmatter under the configured notes folder.
@@ -40,57 +46,45 @@ import type {
  * - No global caching.
  */
 export class NotesService {
-  private notesDir: Uri | null = null;
-
   private readonly frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
-
-  private notesInitialized = false;
+  private readonly managedFrontmatterOrder = [
+    'id',
+    'title',
+    'created',
+    'updated',
+    'tags',
+    'links',
+    'references',
+    'summary',
+    'type',
+  ] as const;
+  private readonly managedFrontmatterKeys = new Set(
+    this.managedFrontmatterOrder,
+  );
+  private readonly frontmatterCache = new Map<string, FrontmatterSnapshot>();
 
   /**
    * Initializes configuration only; filesystem access begins when a method is invoked.
    */
   constructor(readonly config: ExtensionConfig) {}
 
-  /**
-   * Surfaces IO/read failures at domain boundaries instead of returning empty success-shaped values.
-   */
-  private failReading(operationDescription: string, cause: unknown): never {
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    throw new Error(`${operationDescription}: ${detail}`, {
-      cause: cause instanceof Error ? cause : undefined,
-    });
-  }
-
-  /**
-   * Ensures `notesDir` is set once when a workspace folder exists. Safe to call repeatedly.
-   */
-  public async ensureNotesDirectoryExists(): Promise<void> {
-    if (this.notesInitialized) {
-      return;
-    }
-
+  private get notesDir(): Uri | null {
     const rootFolderUri = getWorkspaceFolderUri(this.config);
+
     if (!rootFolderUri) {
-      return;
+      return null;
     }
 
-    this.notesDir = Uri.joinPath(rootFolderUri, this.config.notesFolder);
+    const resolvedNotesRoot = Uri.joinPath(
+      rootFolderUri,
+      this.config.notesFolder,
+    );
 
-    this.notesInitialized = true;
+    return resolvedNotesRoot;
   }
 
-  /**
-   * Returns the resolved notes directory after {@link ensureNotesDirectoryExists}, or `null` if unavailable.
-   */
   getNotesDirectoryUri(): Uri | null {
     return this.notesDir;
-  }
-
-  /**
-   * Ensures the in-memory notes path is initialized (does not create the folder on disk until a write).
-   */
-  async initializeNotesDirectory(): Promise<void> {
-    await this.ensureNotesDirectoryExists();
   }
 
   /**
@@ -102,10 +96,25 @@ export class NotesService {
     if (context?.noteUris) {
       return context.noteUris;
     }
-    const uris = await this.discoverNoteFileUris();
+
+    if (!this.notesDir) {
+      return [];
+    }
+
+    const files = await findFiles({
+      baseDirectoryPath: this.notesDir.fsPath,
+      baseDirectoryUri: this.notesDir,
+      includeFilePatterns: ['**/*.md'],
+      includeDotfiles: true,
+    });
+    const uris = [...files].sort((fileUriA, fileUriB) =>
+      fileUriA.fsPath.localeCompare(fileUriB.fsPath),
+    );
+
     if (context) {
       context.noteUris = uris;
     }
+
     return uris;
   }
 
@@ -117,17 +126,9 @@ export class NotesService {
   async getAllNotes(): Promise<Note[]> {
     const context: OperationContext = {};
     const noteUris = await this.discoverNoteFileUrisThroughContext(context);
-    const notePromises = noteUris.map((uri) => this.readNote(uri));
+    const notePromises = noteUris.map((uri) => this.getNote(uri));
     const notes = await Promise.all(notePromises);
     return notes.filter((note): note is Note => note !== null);
-  }
-
-  /**
-   * Sorted absolute paths to `.md` note files under the notes folder.
-   * Does not read file contents.
-   */
-  async listNoteFilePaths(): Promise<string[]> {
-    return this.collectMarkdownNotePaths();
   }
 
   /**
@@ -195,7 +196,53 @@ export class NotesService {
   }> {
     const ctx = operationCtx ?? {};
     const validation = await this.validateNotesIdentityCore(ctx);
-    return this.resolveOutboundLinks(noteId, validation, ctx);
+    const trimmed = noteId.trim();
+    if (!trimmed) {
+      return { valid: [], broken: [] };
+    }
+
+    const duplicate = validation.errors.some(
+      (e) => e.type === 'duplicated-id' && e.id === trimmed,
+    );
+    if (duplicate) {
+      return { valid: [], broken: [] };
+    }
+
+    const sourceUri = validation.index.get(trimmed);
+    if (!sourceUri) {
+      return { valid: [], broken: [] };
+    }
+
+    let noteContent = '';
+    try {
+      noteContent = await readFileContent(sourceUri);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Failed to resolve outbound links for note "${trimmed}" while reading ${sourceUri.fsPath}: ${detail}`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
+
+    const { data: identity } = this.parseIdentityFromMarkdown(noteContent);
+    const links = identity?.links ?? [];
+    const valid: { id: string; uri: Uri }[] = [];
+    const broken: string[] = [];
+
+    for (const linkId of links) {
+      if (typeof linkId !== 'string' || !linkId.trim()) {
+        continue;
+      }
+      const id = linkId.trim();
+      const linkedUri = validation.index.get(id);
+      if (linkedUri) {
+        valid.push({ id, uri: linkedUri });
+      } else {
+        broken.push(id);
+      }
+    }
+
+    return { valid, broken };
   }
 
   /**
@@ -214,7 +261,67 @@ export class NotesService {
     sources: { id: string; uri: Uri; title?: string }[];
   }> {
     const ctx = operationCtx ?? {};
-    return this.resolveBacklinkSources(targetId, ctx);
+    const trimmedTargetId = targetId.trim();
+    if (!trimmedTargetId) {
+      return { sources: [] };
+    }
+
+    const discoveredNoteUris =
+      await this.discoverNoteFileUrisThroughContext(ctx);
+    const sources: { id: string; uri: Uri; title?: string }[] = [];
+    const contents = await Promise.all(
+      discoveredNoteUris.map(
+        async (
+          noteUri,
+        ): Promise<{
+          noteUri: Uri;
+          content?: string;
+          readError?: unknown;
+        }> => {
+          try {
+            const content = await readFileContent(noteUri);
+            return { noteUri, content };
+          } catch (readError) {
+            return { noteUri, readError };
+          }
+        },
+      ),
+    );
+
+    if (
+      discoveredNoteUris.length > 0 &&
+      contents.every((entry) => entry.content === undefined)
+    ) {
+      const cause =
+        contents.find((entry) => entry.readError !== undefined)?.readError ??
+        new Error('Unknown read failure');
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(
+        `Failed to resolve backlinks for note "${trimmedTargetId}": no readable notes among ${discoveredNoteUris.length} candidate file(s): ${detail}`,
+        { cause: cause instanceof Error ? cause : undefined },
+      );
+    }
+
+    for (const { noteUri, content } of contents) {
+      if (content === undefined) {
+        continue;
+      }
+
+      const { data: identity } = this.parseIdentityFromMarkdown(content);
+      const id = identity?.id;
+      const links = identity?.links ?? [];
+      if (!id || !links.includes(trimmedTargetId)) {
+        continue;
+      }
+
+      sources.push({
+        id,
+        uri: noteUri,
+        title: identity?.title,
+      });
+    }
+
+    return { sources };
   }
 
   /**
@@ -234,7 +341,116 @@ export class NotesService {
     broken: { file: string; reason: string }[];
   }> {
     const ctx = operationCtx ?? {};
-    return this.resolveDeclaredReferences(noteId, ctx);
+    const trimmedNoteId = noteId.trim();
+    if (!trimmedNoteId) {
+      return { valid: [], broken: [] };
+    }
+
+    const validation = await this.validateNotesIdentityCore(ctx);
+    const duplicate = validation.errors.some(
+      (e) => e.type === 'duplicated-id' && e.id === trimmedNoteId,
+    );
+    if (duplicate) {
+      return { valid: [], broken: [] };
+    }
+
+    const sourceUri = validation.index.get(trimmedNoteId);
+    if (!sourceUri) {
+      return { valid: [], broken: [] };
+    }
+
+    const rootFolderUri = getWorkspaceFolderUri(this.config, sourceUri);
+    if (!rootFolderUri) {
+      return { valid: [], broken: [] };
+    }
+
+    let noteMarkdown = '';
+    try {
+      noteMarkdown = await readFileContent(sourceUri);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Failed to resolve references for note "${trimmedNoteId}" while reading ${sourceUri.fsPath}: ${detail}`,
+        { cause: error instanceof Error ? error : undefined },
+      );
+    }
+
+    const normalizedMarkdown = noteMarkdown.replace(/\r\n/g, '\n');
+    let frontmatter = '';
+    if (normalizedMarkdown.startsWith('---\n')) {
+      const frontmatterEndIndex = normalizedMarkdown.indexOf('\n---\n', 4);
+      if (frontmatterEndIndex !== -1) {
+        frontmatter = normalizedMarkdown.slice(4, frontmatterEndIndex);
+      }
+    }
+    const declarations = parseDeclaredReferencesFromFrontmatter(frontmatter);
+
+    const resolutionResults = await Promise.all(
+      declarations.map(async (ref) => {
+        const candidateUris = this.resolveWorkspaceReferenceUris(
+          rootFolderUri,
+          ref.file,
+        );
+        let uri = candidateUris[0] ?? null;
+
+        for (const candidateUri of candidateUris) {
+          try {
+            await workspace.fs.stat(candidateUri);
+            uri = candidateUri;
+            break;
+          } catch {
+            // Try the next candidate.
+          }
+        }
+
+        if (!uri) {
+          return {
+            ref,
+            outcome: 'invalid' as const,
+          };
+        }
+
+        try {
+          await workspace.fs.stat(uri);
+          const line =
+            ref.line !== undefined &&
+            Number.isInteger(ref.line) &&
+            ref.line >= 1
+              ? ref.line
+              : undefined;
+          return {
+            ref,
+            outcome: 'ok' as const,
+            uri,
+            line,
+          };
+        } catch {
+          return {
+            ref,
+            outcome: 'missing' as const,
+          };
+        }
+      }),
+    );
+
+    const valid: { file: string; uri: Uri; line?: number }[] = [];
+    const broken: { file: string; reason: string }[] = [];
+
+    for (const result of resolutionResults) {
+      if (result.outcome === 'ok') {
+        valid.push({
+          file: result.ref.file,
+          uri: result.uri,
+          line: result.line,
+        });
+      } else if (result.outcome === 'invalid') {
+        broken.push({ file: result.ref.file, reason: 'Invalid path' });
+      } else {
+        broken.push({ file: result.ref.file, reason: 'File not found' });
+      }
+    }
+
+    return { valid, broken };
   }
 
   /**
@@ -243,8 +459,6 @@ export class NotesService {
   async getNotesByFileReference(fileUri: Uri): Promise<{
     notes: { id: string; uri: Uri; title?: string }[];
   }> {
-    await this.ensureNotesDirectoryExists();
-
     const targetPaths = this.getReferenceTargetPaths(fileUri);
 
     const noteUris = await this.discoverNoteFileUrisThroughContext();
@@ -252,7 +466,7 @@ export class NotesService {
     const seenPaths = new Set<string>();
 
     for (const noteUri of noteUris) {
-      const note = await this.readNote(noteUri);
+      const note = await this.getNote(noteUri);
       if (!note) {
         continue;
       }
@@ -304,15 +518,13 @@ export class NotesService {
    * References without a line imply line `1` (file-level context). Sorted ascending.
    */
   async getContextDecorationLinesForFile(fileUri: Uri): Promise<number[]> {
-    await this.ensureNotesDirectoryExists();
-
     const targetPaths = this.getReferenceTargetPaths(fileUri);
 
     const noteUris = await this.discoverNoteFileUrisThroughContext();
     const lines = new Set<number>();
 
     for (const noteUri of noteUris) {
-      const note = await this.readNote(noteUri);
+      const note = await this.getNote(noteUri);
       if (!note) {
         continue;
       }
@@ -332,7 +544,13 @@ export class NotesService {
           continue;
         }
 
-        lines.add(this.effectiveReferenceLine(ref));
+        const referenceLine =
+          typeof ref.line === 'number' &&
+          Number.isInteger(ref.line) &&
+          ref.line >= 1
+            ? ref.line
+            : 1;
+        lines.add(referenceLine);
       }
     }
 
@@ -347,8 +565,6 @@ export class NotesService {
     fileUri: Uri,
     oneBasedLines: readonly number[],
   ): Promise<Map<number, { id: string; uri: Uri; title?: string }[]>> {
-    await this.ensureNotesDirectoryExists();
-
     const interest = new Set(oneBasedLines.filter((l) => l >= 1));
     const buckets = new Map<
       number,
@@ -368,7 +584,7 @@ export class NotesService {
     const noteUris = await this.discoverNoteFileUrisThroughContext();
 
     for (const noteUri of noteUris) {
-      const note = await this.readNote(noteUri);
+      const note = await this.getNote(noteUri);
       if (!note) {
         continue;
       }
@@ -393,7 +609,12 @@ export class NotesService {
           continue;
         }
 
-        const effectiveLine = this.effectiveReferenceLine(ref);
+        const effectiveLine =
+          typeof ref.line === 'number' &&
+          Number.isInteger(ref.line) &&
+          ref.line >= 1
+            ? ref.line
+            : 1;
         if (!interest.has(effectiveLine)) {
           continue;
         }
@@ -436,10 +657,69 @@ export class NotesService {
     fileUri: Uri,
     line: number,
   ): Promise<{ notes: { id: string; uri: Uri; title?: string }[] }> {
-    const map = await this.getNotesForFileGroupedByReferenceLine(fileUri, [
-      line,
-    ]);
-    return { notes: map.get(line) ?? [] };
+    const targetPaths = this.getReferenceTargetPaths(fileUri);
+    const noteUris = await this.discoverNoteFileUrisThroughContext();
+    const notesByPath = new Map<
+      string,
+      { id: string; uri: Uri; title?: string }
+    >();
+
+    for (const noteUri of noteUris) {
+      const note = await this.getNote(noteUri);
+      if (!note) {
+        continue;
+      }
+
+      const references = note.references ?? [];
+      if (references.length === 0) {
+        continue;
+      }
+
+      const rootFolderUri = getWorkspaceFolderUri(this.config, noteUri);
+      if (!rootFolderUri) {
+        continue;
+      }
+
+      const id =
+        note.id?.trim() ||
+        basenameFromFsPath(noteUri.fsPath).replace(/\.md$/i, '');
+      const titleTrim = note.title?.trim();
+
+      for (const ref of references) {
+        if (!this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
+          continue;
+        }
+
+        const effectiveLine =
+          typeof ref.line === 'number' &&
+          Number.isInteger(ref.line) &&
+          ref.line >= 1
+            ? ref.line
+            : 1;
+        if (effectiveLine !== line) {
+          continue;
+        }
+
+        const dedupeKey = toPosixPath(noteUri.fsPath);
+        if (notesByPath.has(dedupeKey)) {
+          continue;
+        }
+
+        notesByPath.set(dedupeKey, {
+          id,
+          uri: noteUri,
+          ...(titleTrim ? { title: titleTrim } : {}),
+        });
+      }
+    }
+
+    const notes = Array.from(notesByPath.values()).sort((a, b) => {
+      const aLabel = (a.title ?? a.id).toLowerCase();
+      const bLabel = (b.title ?? b.id).toLowerCase();
+      return aLabel.localeCompare(bLabel);
+    });
+
+    return { notes };
   }
 
   /**
@@ -450,22 +730,20 @@ export class NotesService {
     content = '',
     tags?: string[],
   ): Promise<Note | null> {
-    await this.ensureNotesDirectoryExists();
     if (!this.notesDir) {
       return null;
     }
 
-    const now = new Date();
+    const filename = title
+      .replace(/[<>:"/\|?*]/g, '-')
+      .replace(/\s+/g, '_')
+      .replace(/-+/g, '-')
+      .toLowerCase();
     const note: Note = {
-      id: this.sanitizeFilename(title),
+      id: filename,
       title,
       content,
-      filePath: Uri.joinPath(
-        this.notesDir,
-        `${this.sanitizeFilename(title)}.md`,
-      ).fsPath,
-      createdAt: now,
-      updatedAt: now,
+      filePath: Uri.joinPath(this.notesDir, `${filename}.md`).fsPath,
       ...(tags !== undefined ? { tags } : {}),
     };
 
@@ -473,7 +751,10 @@ export class NotesService {
       await this.saveNote(note);
       return note;
     } catch (error) {
-      this.failReading('Failed to create note file', error);
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to create note file: ${detail}`, {
+        cause: error instanceof Error ? error : undefined,
+      });
     }
   }
 
@@ -481,12 +762,107 @@ export class NotesService {
    * Loads a single note from disk using the file URI. Returns `null` if the file is missing or unreadable.
    */
   async getNote(fileUri: Uri): Promise<Note | null> {
-    await this.ensureNotesDirectoryExists();
-    return this.readNote(fileUri);
+    try {
+      await workspace.fs.stat(fileUri);
+    } catch {
+      return null;
+    }
+
+    try {
+      const content = await readFileContent(fileUri);
+
+      const frontmatterMatch = content.match(this.frontmatterRegex);
+      const frontmatter = frontmatterMatch?.[1] ?? '';
+      const parsed = parseFrontmatterDialect(frontmatter, {
+        listKeys: ['tags', 'links'],
+      });
+      const fields = parsed.scalars;
+      const noteContent = frontmatterMatch
+        ? content.slice(frontmatterMatch.index! + frontmatterMatch[0].length)
+        : content;
+
+      if (frontmatterMatch) {
+        const snapshot = this.captureFrontmatterSnapshot(frontmatter);
+        this.frontmatterCache.set(fileUri.fsPath, snapshot);
+      }
+
+      const fileName = basenameFromFsPath(fileUri.fsPath).replace(/\.md$/i, '');
+      const createdAt = fields.created
+        ? this.parseFrontmatterDate(fields.created)
+        : undefined;
+      const updatedAt = fields.updated
+        ? this.parseFrontmatterDate(fields.updated)
+        : undefined;
+
+      const references = parseDeclaredReferencesFromFrontmatter(frontmatter);
+
+      if (parsed.warnings.length > 0) {
+        for (const warning of parsed.warnings) {
+          console.warn(
+            `[CodeContext+] Frontmatter warning in ${fileUri.fsPath}: ${warning}`,
+          );
+        }
+      }
+
+      let tags: string[] | undefined;
+      if (Object.prototype.hasOwnProperty.call(parsed.lists, 'tags')) {
+        tags = parsed.lists.tags;
+      } else if (fields.tags) {
+        const trimmedTags = fields.tags.trim();
+        if (trimmedTags.startsWith('[') && trimmedTags.endsWith(']')) {
+          const tagsInner = trimmedTags.slice(1, -1).trim();
+          tags = tagsInner
+            ? tagsInner
+                .split(',')
+                .map((listEntry) => listEntry.trim())
+                .filter((listEntry) => listEntry.length > 0)
+            : [];
+        } else {
+          tags = [trimmedTags];
+        }
+      }
+
+      let links: string[] | undefined;
+      if (Object.prototype.hasOwnProperty.call(parsed.lists, 'links')) {
+        links = parsed.lists.links;
+      } else if (fields.links) {
+        const trimmedLinks = fields.links.trim();
+        if (trimmedLinks.startsWith('[') && trimmedLinks.endsWith(']')) {
+          const linksInner = trimmedLinks.slice(1, -1).trim();
+          links = linksInner
+            ? linksInner
+                .split(',')
+                .map((listEntry) => listEntry.trim())
+                .filter((listEntry) => listEntry.length > 0)
+            : [];
+        } else {
+          links = [trimmedLinks];
+        }
+      }
+
+      return {
+        id: fields.id ?? '',
+        title: fields.title ?? fileName,
+        content: noteContent,
+        filePath: fileUri.fsPath,
+        ...(createdAt ? { createdAt } : {}),
+        ...(updatedAt ? { updatedAt } : {}),
+        type: fields.type,
+        tags,
+        links,
+        references: references.length > 0 ? references : undefined,
+        summary: fields.summary,
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to read note (${fileUri.fsPath}): ${detail}`, {
+        cause: error instanceof Error ? error : undefined,
+      });
+    }
   }
 
   /**
-   * Persists `note` with an updated `updatedAt` timestamp. Returns `null` if the file does not exist.
+   * Persists `note` without mutating timestamps. Returns `null` if the file does not exist.
    */
   async updateNote(note: Note): Promise<Note | null> {
     try {
@@ -495,16 +871,14 @@ export class NotesService {
       return null;
     }
 
-    const updatedNote: Note = {
-      ...note,
-      updatedAt: new Date(),
-    };
-
     try {
-      await this.saveNote(updatedNote);
-      return updatedNote;
+      await this.saveNote(note);
+      return note;
     } catch (error) {
-      this.failReading(`Failed to save note (${updatedNote.filePath})`, error);
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to save note (${note.filePath}): ${detail}`, {
+        cause: error instanceof Error ? error : undefined,
+      });
     }
   }
 
@@ -538,221 +912,357 @@ export class NotesService {
     }
   }
 
-  /**
-   * Builds a small struct describing a link from a note to a code location (used when inserting Markdown links).
-   */
-  createNoteLink(
+  async addLinkToNote(
     note: Note,
-    targetFilePath: string,
-    targetLine: number,
-  ): NoteLink {
-    return {
-      notePath: note.filePath,
-      noteTitle: note.title,
-      targetFilePath,
-      targetLine,
-    };
-  }
-
-  /**
-   * Renders a Markdown link to the note using a workspace-relative path.
-   */
-  formatNoteLinkMarkdown(link: NoteLink): string {
-    const relPath = workspace.asRelativePath(Uri.file(link.notePath), false);
-    return `[${link.noteTitle}](${relPath})`;
-  }
-
-  /**
-   * Discovers all `.md` note files under the notes directory.
-   * Sorted by filepath for deterministic ordering.
-   * @private
-   */
-  private async discoverNoteFileUris(): Promise<Uri[]> {
-    if (!this.notesDir) {
-      await this.ensureNotesDirectoryExists();
-      if (!this.notesDir) {
-        return [];
-      }
+    targetNoteId: string,
+  ): Promise<'added' | 'duplicate'> {
+    const trimmedTargetId = targetNoteId.trim();
+    if (!trimmedTargetId) {
+      throw new Error(
+        `Cannot add related note: missing target note id for ${note.filePath}`,
+      );
     }
 
-    const files = await findFiles({
-      baseDirectoryPath: this.notesDir.fsPath,
-      baseDirectoryUri: this.notesDir,
-      includeFilePatterns: ['**/*.md'],
-      includeDotfiles: true,
-    });
+    const existingLinks = note.links ?? [];
+    const normalizedLinks = existingLinks
+      .map((linkId) => linkId.trim())
+      .filter((linkId) => linkId.length > 0);
 
-    const sorted = [...files].sort((fileUriA, fileUriB) =>
-      fileUriA.fsPath.localeCompare(fileUriB.fsPath),
+    if (normalizedLinks.includes(trimmedTargetId)) {
+      return 'duplicate';
+    }
+
+    const nextLinks = [...existingLinks, trimmedTargetId];
+    const nextNote: Note = {
+      ...note,
+      links: nextLinks,
+    };
+
+    const saved = await this.updateNote(nextNote);
+    if (!saved) {
+      throw new Error(
+        `Cannot add related note because the source file does not exist: ${note.filePath}`,
+      );
+    }
+
+    return 'added';
+  }
+
+  async addReferenceForLocation(
+    note: Note,
+    targetFileUri: Uri,
+    line?: number,
+  ): Promise<'added' | 'duplicate'> {
+    const candidateReference = this.buildDeclaredReference(targetFileUri, line);
+    const existingReferences = note.references ?? [];
+
+    const alreadyDeclared = existingReferences.some((ref) =>
+      this.areDeclaredReferencesEqual(ref, candidateReference),
     );
 
-    return sorted;
-  }
-
-  /**
-   * Returns sorted absolute file paths to all discovered note files.
-   * @private
-   */
-  private async collectMarkdownNotePaths(): Promise<string[]> {
-    const ctx: OperationContext = {};
-    const noteUris = await this.discoverNoteFileUrisThroughContext(ctx);
-    return noteUris.map((uri) => uri.fsPath);
-  }
-
-  /**
-   * Reads and parses a single note file from disk.
-   * Returns `null` only when the path does not exist. Throws when the file exists but cannot be read or parsed into a note payload.
-   * @private
-   */
-  private async readNote(fileUri: Uri): Promise<Note | null> {
-    try {
-      await workspace.fs.stat(fileUri);
-    } catch {
-      return null;
+    if (alreadyDeclared) {
+      return 'duplicate';
     }
 
-    try {
-      const content = await readFileContent(fileUri);
+    const nextNote: Note = {
+      ...note,
+      references: [...existingReferences, candidateReference],
+    };
 
-      const frontmatterMatch = content.match(this.frontmatterRegex);
-      const frontmatter = frontmatterMatch?.[1] ?? '';
-      const parsed = parseFrontmatterDialect(frontmatter, {
-        listKeys: ['tags', 'links'],
-      });
-      const fields = parsed.scalars;
-      const noteContent = frontmatterMatch
-        ? content.replace(frontmatterMatch[0], '').trim()
-        : content.trim();
-
-      const fileName = basenameFromFsPath(fileUri.fsPath).replace(/\.md$/i, '');
-      const createdAt = fields.created ? new Date(fields.created) : new Date(0);
-      const updatedAt = fields.updated ? new Date(fields.updated) : new Date(0);
-
-      const references = parseDeclaredReferencesFromFrontmatter(frontmatter);
-
-      if (parsed.warnings.length > 0) {
-        for (const warning of parsed.warnings) {
-          console.warn(
-            `[CodeContext+] Frontmatter warning in ${fileUri.fsPath}: ${warning}`,
-          );
-        }
-      }
-
-      return {
-        id: fields.id ?? '',
-        title: fields.title ?? fileName,
-        content: noteContent,
-        filePath: fileUri.fsPath,
-        createdAt,
-        updatedAt,
-        type: fields.type,
-        tags: Object.prototype.hasOwnProperty.call(parsed.lists, 'tags')
-          ? parsed.lists.tags
-          : this.parseListField(fields.tags),
-        links: Object.prototype.hasOwnProperty.call(parsed.lists, 'links')
-          ? parsed.lists.links
-          : this.parseListField(fields.links),
-        references: references.length > 0 ? references : undefined,
-        summary: fields.summary,
-      };
-    } catch (error) {
-      this.failReading(`Failed to read note (${fileUri.fsPath})`, error);
+    const saved = await this.updateNote(nextNote);
+    if (!saved) {
+      throw new Error(
+        `Cannot add reference because the note file does not exist: ${note.filePath}`,
+      );
     }
-  }
 
-  /**
-   * Converts a note object into Markdown with YAML frontmatter.
-   * @private
-   */
-  private generateMarkdownContent(note: Note): string {
-    let content = '---\n';
-    content += `id: ${note.id}\n`;
-    content += `title: ${note.title}\n`;
-    content += `created: ${note.createdAt.toISOString()}\n`;
-    content += `updated: ${note.updatedAt.toISOString()}\n`;
-    // Preserve explicit empty-list semantics: write `tags: []` only when the
-    // `tags` property is present on the `note` object. Omit entirely when
-    // `tags` is `undefined` to represent absent metadata.
-    if (Object.prototype.hasOwnProperty.call(note, 'tags')) {
-      if (note.tags && note.tags.length > 0) {
-        content += `tags: [${note.tags.join(', ')}]\n`;
-      } else {
-        content += `tags: []\n`;
-      }
-    }
-    if (note.links && note.links.length > 0) {
-      content += `links: [${note.links.join(', ')}]\n`;
-    }
-    if (note.references && note.references.length > 0) {
-      content += 'references:\n';
-      for (const ref of note.references) {
-        content += `  - file: ${ref.file}\n`;
-        if (ref.line !== undefined) {
-          content += `    line: ${ref.line}\n`;
-        }
-      }
-    }
-    if (note.summary) {
-      content += `summary: ${note.summary}\n`;
-    }
-    content += '---\n\n';
-    content += note.content;
-    return content;
+    return 'added';
   }
 
   /**
    * Writes frontmatter and body to `note.filePath`, creating parent directories as needed.
    */
   async saveNote(note: Note): Promise<void> {
-    await this.ensureNotesDirectoryExists();
-
     const fileUri = Uri.file(note.filePath);
     await workspace.fs.createDirectory(Uri.joinPath(fileUri, '..'));
+    const snapshot = await this.ensureFrontmatterSnapshot(fileUri);
+    const frontmatterBody = this.buildFrontmatter(note, snapshot);
+    const fileContent = `---\n${frontmatterBody}---\n\n${note.content}`;
 
-    const fileContent = this.generateMarkdownContent(note);
     await workspace.fs.writeFile(
       fileUri,
       new TextEncoder().encode(fileContent),
     );
+
+    const nextSnapshot = this.captureFrontmatterSnapshot(frontmatterBody);
+    this.frontmatterCache.set(note.filePath, nextSnapshot);
   }
 
-  /**
-   * Parses frontmatter list syntax `[item1, item2]` into a string array.
-   * Handles quoted items and normalizes whitespace.
-   * @private
-   */
-  private parseListField(value?: string): string[] | undefined {
-    if (!value) {
-      return undefined;
-    }
+  private buildDeclaredReference(
+    fileUri: Uri,
+    line?: number,
+  ): DeclaredReference {
+    const referencePath = this.getReferencePathForUri(fileUri);
+    const normalizedLine =
+      typeof line === 'number' && Number.isInteger(line) && line > 0
+        ? line
+        : undefined;
 
-    const trimmed = value.trim();
-    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
-      return [trimmed];
-    }
-
-    const inner = trimmed.slice(1, -1).trim();
-    if (!inner) {
-      return [];
-    }
-
-    return inner
-      .split(',')
-      .map((listEntry) => listEntry.trim())
-      .filter((listEntry) => listEntry.length > 0);
+    return {
+      file: referencePath,
+      ...(normalizedLine ? { line: normalizedLine } : {}),
+    };
   }
 
-  /**
-   * Converts a note title into a safe filesystem filename.
-   * Removes special characters, lowercases, and normalizes spacing.
-   * @private
-   */
-  private sanitizeFilename(name: string): string {
-    return name
-      .replace(/[<>:"/\\|?*]/g, '-') // Replace invalid chars with dash
-      .replace(/\s+/g, '_') // Replace spaces with underscore
-      .replace(/-+/g, '-') // Remove duplicate dashes
-      .toLowerCase(); // Convert to lowercase
+  private getReferencePathForUri(fileUri: Uri): string {
+    const relativePath = workspace.asRelativePath(fileUri, false);
+    if (relativePath && relativePath.trim().length > 0) {
+      const normalizedRelative = normalizeReferencePath(relativePath);
+      if (normalizedRelative) {
+        return normalizedRelative;
+      }
+    }
+
+    const normalizedAbsolute = normalizeReferencePath(
+      toPosixPath(fileUri.fsPath),
+    );
+    if (!normalizedAbsolute) {
+      throw new Error(
+        `Unable to build reference path for ${fileUri.fsPath}: normalization failed`,
+      );
+    }
+    return normalizedAbsolute;
+  }
+
+  private parseFrontmatterDate(value: string): Date | undefined {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+  }
+
+  private areDeclaredReferencesEqual(
+    left: DeclaredReference,
+    right: DeclaredReference,
+  ): boolean {
+    const leftPath = normalizeReferencePath(left.file);
+    const rightPath = normalizeReferencePath(right.file);
+    if (!leftPath || !rightPath) {
+      return false;
+    }
+
+    const leftLine =
+      typeof left.line === 'number' &&
+      Number.isInteger(left.line) &&
+      left.line > 0
+        ? left.line
+        : undefined;
+    const rightLine =
+      typeof right.line === 'number' &&
+      Number.isInteger(right.line) &&
+      right.line > 0
+        ? right.line
+        : undefined;
+
+    return leftPath === rightPath && leftLine === rightLine;
+  }
+
+  private buildFrontmatter(
+    note: Note,
+    snapshot: FrontmatterSnapshot | null,
+  ): string {
+    const managedSections = this.buildManagedFrontmatterMap(note, {
+      includeCreated: !snapshot && Boolean(note.createdAt),
+      includeUpdated: !snapshot && Boolean(note.updatedAt),
+    });
+
+    if (!snapshot) {
+      const body = this.managedFrontmatterOrder
+        .map((key) => managedSections.get(key))
+        .filter((section): section is string => Boolean(section))
+        .join('');
+      return body.length > 0 && !body.endsWith('\n') ? `${body}\n` : body;
+    }
+
+    const pieces: string[] = [];
+    let cursor = 0;
+    for (const entry of snapshot.entries) {
+      if (entry.start > cursor) {
+        pieces.push(snapshot.raw.slice(cursor, entry.start));
+      }
+
+      if (
+        this.managedFrontmatterKeys.has(
+          entry.key as (typeof this.managedFrontmatterOrder)[number],
+        )
+      ) {
+        const replacement = managedSections.get(
+          entry.key as (typeof this.managedFrontmatterOrder)[number],
+        );
+        if (replacement) {
+          pieces.push(replacement);
+          managedSections.delete(
+            entry.key as (typeof this.managedFrontmatterOrder)[number],
+          );
+        } else if (entry.key === 'created' || entry.key === 'updated') {
+          pieces.push(snapshot.raw.slice(entry.start, entry.end));
+        }
+      } else {
+        pieces.push(snapshot.raw.slice(entry.start, entry.end));
+      }
+
+      cursor = entry.end;
+    }
+
+    if (cursor < snapshot.raw.length) {
+      pieces.push(snapshot.raw.slice(cursor));
+    }
+
+    const remainingManaged: string[] = [];
+    for (const key of this.managedFrontmatterOrder) {
+      const section = managedSections.get(key);
+      if (section) {
+        remainingManaged.push(section);
+      }
+    }
+
+    if (remainingManaged.length > 0) {
+      if (pieces.length > 0 && !pieces[pieces.length - 1].endsWith('\n')) {
+        pieces.push('\n');
+      }
+      pieces.push(remainingManaged.join(''));
+    }
+
+    const merged = pieces.join('');
+    if (merged.length === 0) {
+      return '';
+    }
+    return merged.endsWith('\n') ? merged : `${merged}\n`;
+  }
+
+  private buildManagedFrontmatterMap(
+    note: Note,
+    options?: {
+      includeCreated: boolean;
+      includeUpdated: boolean;
+    },
+  ): Map<(typeof this.managedFrontmatterOrder)[number], string> {
+    const sections = new Map<
+      (typeof this.managedFrontmatterOrder)[number],
+      string
+    >();
+
+    sections.set('id', `id: ${note.id}\n`);
+    sections.set('title', `title: ${note.title}\n`);
+    const includeCreated = options?.includeCreated ?? false;
+    const includeUpdated = options?.includeUpdated ?? false;
+    const createdAtValue = note.createdAt;
+    if (includeCreated && createdAtValue) {
+      sections.set('created', `created: ${createdAtValue.toISOString()}\n`);
+    }
+    const updatedAtValue = note.updatedAt;
+    if (includeUpdated && updatedAtValue) {
+      sections.set('updated', `updated: ${updatedAtValue.toISOString()}\n`);
+    }
+
+    if (Object.prototype.hasOwnProperty.call(note, 'tags')) {
+      if (note.tags && note.tags.length > 0) {
+        sections.set('tags', `tags: [${note.tags.join(', ')}]\n`);
+      } else {
+        sections.set('tags', 'tags: []\n');
+      }
+    }
+
+    if (note.links && note.links.length > 0) {
+      sections.set('links', `links: [${note.links.join(', ')}]\n`);
+    }
+
+    if (note.references && note.references.length > 0) {
+      const serializedRefs = this.serializeReferences(note.references);
+      if (serializedRefs) {
+        sections.set('references', `${serializedRefs}\n`);
+      }
+    }
+
+    if (note.summary) {
+      sections.set('summary', `summary: ${note.summary}\n`);
+    }
+
+    if (note.type && note.type.trim().length > 0) {
+      sections.set('type', `type: ${note.type}\n`);
+    }
+
+    return sections;
+  }
+
+  private serializeReferences(references: DeclaredReference[]): string | null {
+    if (!references || references.length === 0) {
+      return null;
+    }
+    const lines: string[] = ['references:'];
+    for (const ref of references) {
+      lines.push(`  - file: ${ref.file}`);
+      if (ref.line !== undefined) {
+        lines.push(`    line: ${ref.line}`);
+      }
+      if (ref.endLine !== undefined) {
+        lines.push(`    endLine: ${ref.endLine}`);
+      }
+      if (ref.symbol) {
+        lines.push(`    symbol: ${ref.symbol}`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  // (removed extractPreservedFrontmatter helper - merging handled in buildFrontmatter)
+
+  private async ensureFrontmatterSnapshot(
+    fileUri: Uri,
+  ): Promise<FrontmatterSnapshot | null> {
+    const cached = this.frontmatterCache.get(fileUri.fsPath);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const content = await readFileContent(fileUri);
+      const match = content.match(this.frontmatterRegex);
+      if (!match) {
+        return null;
+      }
+      const snapshot = this.captureFrontmatterSnapshot(match[1]);
+      this.frontmatterCache.set(fileUri.fsPath, snapshot);
+      return snapshot;
+    } catch {
+      return null;
+    }
+  }
+
+  private captureFrontmatterSnapshot(frontmatter: string): FrontmatterSnapshot {
+    const entries: FrontmatterEntryRange[] = [];
+    const keyRegex = /^([A-Za-z_][\w-]*)\s*:/gm;
+    const positions: { key: string; index: number }[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = keyRegex.exec(frontmatter)) !== null) {
+      const key = match[1];
+      const lineStart = frontmatter.lastIndexOf('\n', match.index - 1) + 1;
+      const leadingSegment = frontmatter.slice(lineStart, match.index);
+      if (leadingSegment.trim().length > 0) {
+        continue;
+      }
+      positions.push({ key, index: lineStart });
+    }
+
+    for (let i = 0; i < positions.length; i++) {
+      const current = positions[i];
+      const next = positions[i + 1];
+      entries.push({
+        key: current.key,
+        start: current.index,
+        end: next ? next.index : frontmatter.length,
+      });
+    }
+
+    return { raw: frontmatter, entries };
   }
 
   /**
@@ -796,9 +1306,10 @@ export class NotesService {
       const cause =
         fileReads.find((read) => read.readError !== undefined)?.readError ??
         new Error('Unknown read failure');
-      this.failReading(
-        `Failed to build notes identity index for ${noteUris.length} discovered note file(s): none could be read`,
-        cause,
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(
+        `Failed to build notes identity index for ${noteUris.length} discovered note file(s): none could be read: ${detail}`,
+        { cause: cause instanceof Error ? cause : undefined },
       );
     }
 
@@ -880,12 +1391,53 @@ export class NotesService {
       const title = parsed.scalars.title
         ? stripYamlQuotes(parsed.scalars.title)
         : undefined;
-      const rawLinks = Object.prototype.hasOwnProperty.call(
-        parsed.lists,
-        'links',
-      )
-        ? parsed.lists.links
-        : this.parseLinksFromFrontmatterField(parsed.scalars.links, errors);
+      let rawLinks: string[] | undefined;
+      if (Object.prototype.hasOwnProperty.call(parsed.lists, 'links')) {
+        rawLinks = parsed.lists.links;
+      } else {
+        const value = parsed.scalars.links;
+        if (Array.isArray(value)) {
+          const sanitized = value
+            .filter((l): l is string => typeof l === 'string')
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0);
+          rawLinks = Array.from(new Set(sanitized));
+        } else if (typeof value !== 'string') {
+          if (value !== undefined) {
+            errors.push('links: expected string or array form');
+          }
+          rawLinks = [];
+        } else {
+          const trimmed = value.trim();
+          if (!trimmed) {
+            rawLinks = [];
+          } else if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+            errors.push('links: expected bracket list');
+            rawLinks = [];
+          } else {
+            const inner = trimmed.slice(1, -1).trim();
+            if (!inner) {
+              rawLinks = [];
+            } else {
+              const parsedInner = inner
+                .split(',')
+                .map((s) => s.trim())
+                .map((s) => {
+                  if (
+                    (s.startsWith('"') && s.endsWith('"')) ||
+                    (s.startsWith("'") && s.endsWith("'"))
+                  ) {
+                    return s.slice(1, -1).trim();
+                  }
+                  return s;
+                })
+                .filter((s) => s.length > 0);
+              rawLinks = Array.from(new Set(parsedInner));
+            }
+          }
+        }
+      }
+
       const links = Array.from(
         new Set(
           (rawLinks ?? [])
@@ -909,333 +1461,6 @@ export class NotesService {
       const message = e instanceof Error ? e.message : String(e);
       return { data: { links: [] }, errors: [message] };
     }
-  }
-
-  /**
-   * Parses the YAML `links` field value (`[id1, id2]`) or a homogeneous string array into note ids.
-   */
-  private parseLinksFromFrontmatterField(
-    value: unknown,
-    errors?: string[],
-  ): string[] {
-    if (Array.isArray(value)) {
-      const sanitized = value
-        .filter((l): l is string => typeof l === 'string')
-        .map((l) => l.trim())
-        .filter((l) => l.length > 0);
-      return Array.from(new Set(sanitized));
-    }
-
-    if (typeof value !== 'string') {
-      errors?.push('links: expected string or array form');
-      return [];
-    }
-
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return [];
-    }
-
-    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
-      if (trimmed.length > 0) {
-        errors?.push('links: expected bracket list');
-      }
-      return [];
-    }
-
-    const inner = trimmed.slice(1, -1).trim();
-    if (!inner) {
-      return [];
-    }
-
-    const parsed = inner
-      .split(',')
-      .map((linkSegment) => linkSegment.trim())
-      .map((linkSegment) => {
-        if (
-          (linkSegment.startsWith('"') && linkSegment.endsWith('"')) ||
-          (linkSegment.startsWith("'") && linkSegment.endsWith("'"))
-        ) {
-          return linkSegment.slice(1, -1).trim();
-        }
-        return linkSegment;
-      })
-      .filter(
-        (linkSegment) =>
-          typeof linkSegment === 'string' && linkSegment.length > 0,
-      );
-
-    return Array.from(new Set(parsed));
-  }
-
-  /**
-   * Resolves `links` declared in frontmatter for the note identified by `noteId`.
-   *
-   * @throws When the source markdown cannot be read — outbound links cannot be derived without it.
-   */
-  private async resolveOutboundLinks(
-    noteId: string,
-    validation: NotesIdentityValidationResult,
-    _operationCtx?: OperationContext,
-  ): Promise<ResolvedLinksResult> {
-    const trimmed = noteId.trim();
-    if (!trimmed) {
-      return { valid: [], broken: [] };
-    }
-
-    const duplicate = validation.errors.some(
-      (e) => e.type === 'duplicated-id' && e.id === trimmed,
-    );
-    if (duplicate) {
-      return { valid: [], broken: [] };
-    }
-
-    const sourceUri = validation.index.get(trimmed);
-    if (!sourceUri) {
-      return { valid: [], broken: [] };
-    }
-
-    let noteContent = '';
-    try {
-      noteContent = await readFileContent(sourceUri);
-    } catch (error) {
-      this.failReading(
-        `Failed to resolve outbound links for note "${trimmed}" while reading ${sourceUri.fsPath}`,
-        error,
-      );
-    }
-
-    const { data: identity } = this.parseIdentityFromMarkdown(noteContent);
-    const links = identity?.links ?? [];
-
-    const valid: { id: string; uri: Uri }[] = [];
-    const broken: string[] = [];
-
-    for (const linkId of links) {
-      if (typeof linkId !== 'string' || !linkId.trim()) {
-        continue;
-      }
-      const id = linkId.trim();
-      const linkedUri = validation.index.get(id);
-      if (linkedUri) {
-        valid.push({ id, uri: linkedUri });
-      } else {
-        broken.push(id);
-      }
-    }
-
-    return { valid, broken };
-  }
-
-  /**
-   * Resolves reverse links: notes that declare `targetId` inside their frontmatter `links`.
-   *
-   * @throws When every candidate note fails to read while backlinks must be evaluated across the note set.
-   */
-  private async resolveBacklinkSources(
-    targetId: string,
-    ctx: OperationContext,
-  ): Promise<BacklinkSourcesResult> {
-    const trimmedTargetId = targetId.trim();
-    if (!trimmedTargetId) {
-      return { sources: [] };
-    }
-
-    const discoveredNoteUris =
-      await this.discoverNoteFileUrisThroughContext(ctx);
-
-    const sources: NoteReference[] = [];
-
-    const contents = await Promise.all(
-      discoveredNoteUris.map(
-        async (
-          noteUri,
-        ): Promise<{
-          noteUri: Uri;
-          content?: string;
-          readError?: unknown;
-        }> => {
-          try {
-            const content = await readFileContent(noteUri);
-            return { noteUri, content };
-          } catch (readError) {
-            return { noteUri, readError };
-          }
-        },
-      ),
-    );
-
-    if (
-      discoveredNoteUris.length > 0 &&
-      contents.every((entry) => entry.content === undefined)
-    ) {
-      const cause =
-        contents.find((entry) => entry.readError !== undefined)?.readError ??
-        new Error('Unknown read failure');
-      this.failReading(
-        `Failed to resolve backlinks for note "${trimmedTargetId}": no readable notes among ${discoveredNoteUris.length} candidate file(s)`,
-        cause,
-      );
-    }
-
-    for (const { noteUri, content } of contents) {
-      if (content === undefined) {
-        continue;
-      }
-
-      const { data: identity } = this.parseIdentityFromMarkdown(content);
-
-      const id = identity?.id;
-      const links = identity?.links ?? [];
-      if (!id) {
-        continue;
-      }
-
-      if (!links.includes(trimmedTargetId)) {
-        continue;
-      }
-
-      sources.push({
-        id,
-        uri: noteUri,
-        title: identity?.title,
-      });
-    }
-
-    return { sources };
-  }
-
-  /**
-   * Resolves `references` declared in frontmatter for the note identified by `noteId`.
-   *
-   * @throws When the source note cannot be read — references cannot be extracted without frontmatter access.
-   */
-  private async resolveDeclaredReferences(
-    noteId: string,
-    ctx: OperationContext,
-  ): Promise<ResolvedReferencesResult> {
-    const trimmedNoteId = noteId.trim();
-    if (!trimmedNoteId) {
-      return { valid: [], broken: [] };
-    }
-
-    const validation = await this.validateNotesIdentityCore(ctx);
-    const duplicate = validation.errors.some(
-      (e) => e.type === 'duplicated-id' && e.id === trimmedNoteId,
-    );
-    if (duplicate) {
-      return { valid: [], broken: [] };
-    }
-
-    const sourceUri = validation.index.get(trimmedNoteId);
-    if (!sourceUri) {
-      return { valid: [], broken: [] };
-    }
-
-    const rootFolderUri = getWorkspaceFolderUri(this.config, sourceUri);
-    if (!rootFolderUri) {
-      return { valid: [], broken: [] };
-    }
-
-    let noteMarkdown = '';
-    try {
-      noteMarkdown = await readFileContent(sourceUri);
-    } catch (error) {
-      this.failReading(
-        `Failed to resolve references for note "${trimmedNoteId}" while reading ${sourceUri.fsPath}`,
-        error,
-      );
-    }
-
-    const frontmatter = this.extractReferencesFrontmatterBlock(noteMarkdown);
-    const declarations = parseDeclaredReferencesFromFrontmatter(frontmatter);
-
-    const resolutionResults = await Promise.all(
-      declarations.map(async (ref) => {
-        const uri = await this.resolveDeclaredReferenceUri(
-          rootFolderUri,
-          ref.file,
-        );
-        if (!uri) {
-          return {
-            ref,
-            outcome: 'invalid' as const,
-          };
-        }
-
-        try {
-          await workspace.fs.stat(uri);
-          const line =
-            ref.line !== undefined &&
-            Number.isInteger(ref.line) &&
-            ref.line >= 1
-              ? ref.line
-              : undefined;
-          return {
-            ref,
-            outcome: 'ok' as const,
-            uri,
-            line,
-          };
-        } catch {
-          return {
-            ref,
-            outcome: 'missing' as const,
-          };
-        }
-      }),
-    );
-
-    const valid: { file: string; uri: Uri; line?: number }[] = [];
-    const broken: { file: string; reason: string }[] = [];
-
-    for (const result of resolutionResults) {
-      if (result.outcome === 'ok') {
-        valid.push({
-          file: result.ref.file,
-          uri: result.uri,
-          line: result.line,
-        });
-      } else if (result.outcome === 'invalid') {
-        broken.push({ file: result.ref.file, reason: 'Invalid path' });
-      } else {
-        broken.push({ file: result.ref.file, reason: 'File not found' });
-      }
-    }
-
-    return { valid, broken };
-  }
-
-  /**
-   * Extracts the YAML frontmatter content (between `---` markers) from a Markdown file.
-   */
-  private extractReferencesFrontmatterBlock(markdown: string): string {
-    const normalized = markdown.replace(/\r\n/g, '\n');
-    if (!normalized.startsWith('---\n')) {
-      return '';
-    }
-
-    const endIndex = normalized.indexOf('\n---\n', 4);
-    if (endIndex === -1) {
-      return '';
-    }
-
-    return normalized.slice(4, endIndex);
-  }
-
-  /**
-   * Removes surrounding YAML quote characters (`"` or `'`) if present.
-   */
-
-  /**
-   * 1-based line from a reference row; missing or invalid line means file-level (`1`).
-   */
-  private effectiveReferenceLine(ref: DeclaredReference): number {
-    const ln = ref.line;
-    if (typeof ln === 'number' && Number.isInteger(ln) && ln >= 1) {
-      return ln;
-    }
-    return 1;
   }
 
   /**
@@ -1321,30 +1546,6 @@ export class NotesService {
     }
 
     return candidates;
-  }
-
-  /**
-   * Resolves a reference path to the first existing absolute `Uri`, preferring the workspace root.
-   */
-  private async resolveDeclaredReferenceUri(
-    workspaceRoot: Uri,
-    fileRef: string,
-  ): Promise<Uri | null> {
-    const candidates = this.resolveWorkspaceReferenceUris(
-      workspaceRoot,
-      fileRef,
-    );
-
-    for (const candidate of candidates) {
-      try {
-        await workspace.fs.stat(candidate);
-        return candidate;
-      } catch {
-        // Try the next candidate.
-      }
-    }
-
-    return candidates[0] ?? null;
   }
 
   /**
