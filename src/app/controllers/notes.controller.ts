@@ -159,16 +159,60 @@ export class NotesController {
       },
     );
 
-    const selected = await window.showQuickPick(
-      this.toNoteQuickPickItems(selectableNotes),
-    );
+    const selectableItems = this.toNoteQuickPickItems(selectableNotes);
+    const selectedItems = await window.showQuickPick(selectableItems, {
+      canPickMany: true,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      placeHolder: l10n.t('Select one or more notes to link'),
+    });
 
-    const targetNoteId = selected?.note.id?.trim();
-    if (!targetNoteId) {
+    if (!selectedItems || selectedItems.length === 0) {
       return;
     }
 
-    await this.notesService.addLinkToNote(currentNote, targetNoteId);
+    let addedCount = 0;
+    let duplicateCount = 0;
+
+    for (const selectedItem of selectedItems) {
+      const targetNoteId = selectedItem.note.id?.trim();
+      if (!targetNoteId) {
+        continue;
+      }
+
+      const outcome = await this.notesService.addLinkToNote(
+        currentNote,
+        targetNoteId,
+      );
+
+      if (outcome === 'added') {
+        addedCount += 1;
+      } else {
+        duplicateCount += 1;
+      }
+    }
+
+    if (addedCount === 0) {
+      window.showWarningMessage(
+        l10n.t('All selected notes are already linked'),
+      );
+      return;
+    }
+
+    if (duplicateCount > 0) {
+      window.showInformationMessage(
+        l10n.t(
+          'Added link to {0} note(s). {1} selection(s) were already linked.',
+          String(addedCount),
+          String(duplicateCount),
+        ),
+      );
+      return;
+    }
+
+    window.showInformationMessage(
+      l10n.t('Added link to {0} note(s)', String(addedCount)),
+    );
   }
 
   /**
@@ -181,19 +225,57 @@ export class NotesController {
     }
 
     const notes = await this.notesService.getAllNotes();
-    const selected = await window.showQuickPick(
-      this.toNoteQuickPickItems(notes),
-    );
-    if (!selected) {
+    const noteItems = this.toNoteQuickPickItems(notes);
+    const selectedItems = await window.showQuickPick(noteItems, {
+      canPickMany: true,
+      matchOnDescription: true,
+      matchOnDetail: true,
+      placeHolder: l10n.t('Select one or more notes to append this reference'),
+    });
+
+    if (!selectedItems || selectedItems.length === 0) {
       return;
     }
 
     const fileUri = activeEditor.document.uri;
     const currentLine = activeEditor.selection.active.line + 1;
-    await this.notesService.addReferenceForLocation(
-      selected.note,
-      fileUri,
-      currentLine,
+    let addedCount = 0;
+    let duplicateCount = 0;
+
+    for (const selectedItem of selectedItems) {
+      const outcome = await this.notesService.addReferenceForLocation(
+        selectedItem.note,
+        fileUri,
+        currentLine,
+      );
+
+      if (outcome === 'added') {
+        addedCount += 1;
+      } else {
+        duplicateCount += 1;
+      }
+    }
+
+    if (addedCount === 0) {
+      window.showWarningMessage(
+        l10n.t('All selected notes already reference this location'),
+      );
+      return;
+    }
+
+    if (duplicateCount > 0) {
+      window.showInformationMessage(
+        l10n.t(
+          'Added reference to {0} note(s). {1} selection(s) already had this reference.',
+          String(addedCount),
+          String(duplicateCount),
+        ),
+      );
+      return;
+    }
+
+    window.showInformationMessage(
+      l10n.t('Added reference to {0} note(s)', String(addedCount)),
     );
   }
 

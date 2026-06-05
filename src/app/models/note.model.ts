@@ -57,8 +57,6 @@ export interface Note {
   title: string;
   content: string;
   filePath: string;
-  createdAt?: Date;
-  updatedAt?: Date;
   tags?: string[];
   links?: string[];
   references?: DeclaredReference[];

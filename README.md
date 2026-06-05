@@ -175,6 +175,7 @@ Both formats are supported and normalized into the same deterministic runtime mo
 - Place your cursor on the file and line that needs historical context.
 - Run **CodeContext+: Add reference for current location**.
 - Pick the note that should store the reference and the command appends the normalized `file`/`line` entry to its frontmatter.
+- Select multiple notes in the QuickPick if the same file/line should be referenced from several notes in one step.
 
 This avoids manual YAML editing while preserving the explicit reference model.
 
@@ -201,6 +202,12 @@ This allows related context to remain connected:
 - and architectural reasoning.
 
 Backlinks are derived automatically, making contextual navigation bidirectional.
+
+### Link multiple notes at once
+
+- Open the note that should list related context.
+- Run **CodeContext+: Add related note**.
+- Select one or many notes in the QuickPick to append all of their IDs to the active note's `links` metadata in a single step.
 
 ## Continuity Instead of Searching
 

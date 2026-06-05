@@ -7,14 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-06-04
+
 ### Added
 
-- New "Add reference for current location" command to append the active editor file/line to existing notes without editing frontmatter manually.
-- New "Add related note" command to append an existing note's ID to the active note's `links` metadata via QuickPick.
+- New "Add reference for current location" command to append the active editor file/line to existing notes without editing frontmatter manually. Supports selecting multiple notes in a single operation and reports how many references were added versus already present.
+- New "Add related note" command to append existing note IDs to the active note's `links` metadata via QuickPick. Supports multi-selection and reports when selected links already exist.
 
 ### Changed
 
-- Surface note summaries, types, and tags inside existing context QuickPick commands so selecting the right note no longer requires opening each file.
+- Surface note summaries, note types, and tags inside existing context QuickPick commands so selecting the correct note requires less manual navigation.
 
 ## [1.2.0] - 2026-05-18
 
@@ -56,7 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release of CodeContext+ extension
 
-[Unreleased]: https://github.com/ManuelGil/vscode-code-context-plus/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/ManuelGil/vscode-code-context-plus/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.3.0
 [1.2.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.2.0
 [1.1.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.1.0
 [1.0.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.0.0

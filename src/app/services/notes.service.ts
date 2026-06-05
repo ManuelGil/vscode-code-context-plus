@@ -47,20 +47,6 @@ type FrontmatterSnapshot = {
  */
 export class NotesService {
   private readonly frontmatterRegex = /^---\n([\s\S]*?)\n---\n/;
-  private readonly managedFrontmatterOrder = [
-    'id',
-    'title',
-    'created',
-    'updated',
-    'tags',
-    'links',
-    'references',
-    'summary',
-    'type',
-  ] as const;
-  private readonly managedFrontmatterKeys = new Set(
-    this.managedFrontmatterOrder,
-  );
   private readonly frontmatterCache = new Map<string, FrontmatterSnapshot>();
 
   /**
@@ -747,8 +733,37 @@ export class NotesService {
       ...(tags !== undefined ? { tags } : {}),
     };
 
+    const fileUri = Uri.file(note.filePath);
+    const directoryUri = Uri.joinPath(fileUri, '..');
+    const frontmatterSections: string[] = [
+      `id: ${note.id}\n`,
+      `title: ${note.title}\n`,
+    ];
+
+    if (Object.prototype.hasOwnProperty.call(note, 'tags')) {
+      if (note.tags && note.tags.length > 0) {
+        frontmatterSections.push(`tags: [${note.tags.join(', ')}]\n`);
+      } else {
+        frontmatterSections.push('tags: []\n');
+      }
+    }
+
+    const frontmatterBody = frontmatterSections.join('');
+    const normalizedFrontmatter = frontmatterBody.endsWith('\n')
+      ? frontmatterBody
+      : `${frontmatterBody}\n`;
+
     try {
-      await this.saveNote(note);
+      await workspace.fs.createDirectory(directoryUri);
+      const fileContent = `---\n${normalizedFrontmatter}---\n\n${note.content}`;
+      await workspace.fs.writeFile(
+        fileUri,
+        new TextEncoder().encode(fileContent),
+      );
+
+      const snapshot = this.captureFrontmatterSnapshot(normalizedFrontmatter);
+      this.frontmatterCache.set(note.filePath, snapshot);
+
       return note;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -787,12 +802,6 @@ export class NotesService {
       }
 
       const fileName = basenameFromFsPath(fileUri.fsPath).replace(/\.md$/i, '');
-      const createdAt = fields.created
-        ? this.parseFrontmatterDate(fields.created)
-        : undefined;
-      const updatedAt = fields.updated
-        ? this.parseFrontmatterDate(fields.updated)
-        : undefined;
 
       const references = parseDeclaredReferencesFromFrontmatter(frontmatter);
 
@@ -845,8 +854,6 @@ export class NotesService {
         title: fields.title ?? fileName,
         content: noteContent,
         filePath: fileUri.fsPath,
-        ...(createdAt ? { createdAt } : {}),
-        ...(updatedAt ? { updatedAt } : {}),
         type: fields.type,
         tags,
         links,
@@ -856,27 +863,6 @@ export class NotesService {
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       throw new Error(`Failed to read note (${fileUri.fsPath}): ${detail}`, {
-        cause: error instanceof Error ? error : undefined,
-      });
-    }
-  }
-
-  /**
-   * Persists `note` without mutating timestamps. Returns `null` if the file does not exist.
-   */
-  async updateNote(note: Note): Promise<Note | null> {
-    try {
-      await workspace.fs.stat(Uri.file(note.filePath));
-    } catch {
-      return null;
-    }
-
-    try {
-      await this.saveNote(note);
-      return note;
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to save note (${note.filePath}): ${detail}`, {
         cause: error instanceof Error ? error : undefined,
       });
     }
@@ -933,18 +919,13 @@ export class NotesService {
     }
 
     const nextLinks = [...existingLinks, trimmedTargetId];
-    const nextNote: Note = {
-      ...note,
-      links: nextLinks,
-    };
+    await this.patchFrontmatterSection(
+      note.filePath,
+      'links',
+      (existingEntry) => this.mergeLinksSection(existingEntry, nextLinks),
+    );
 
-    const saved = await this.updateNote(nextNote);
-    if (!saved) {
-      throw new Error(
-        `Cannot add related note because the source file does not exist: ${note.filePath}`,
-      );
-    }
-
+    note.links = nextLinks;
     return 'added';
   }
 
@@ -964,38 +945,16 @@ export class NotesService {
       return 'duplicate';
     }
 
-    const nextNote: Note = {
-      ...note,
-      references: [...existingReferences, candidateReference],
-    };
-
-    const saved = await this.updateNote(nextNote);
-    if (!saved) {
-      throw new Error(
-        `Cannot add reference because the note file does not exist: ${note.filePath}`,
-      );
-    }
-
-    return 'added';
-  }
-
-  /**
-   * Writes frontmatter and body to `note.filePath`, creating parent directories as needed.
-   */
-  async saveNote(note: Note): Promise<void> {
-    const fileUri = Uri.file(note.filePath);
-    await workspace.fs.createDirectory(Uri.joinPath(fileUri, '..'));
-    const snapshot = await this.ensureFrontmatterSnapshot(fileUri);
-    const frontmatterBody = this.buildFrontmatter(note, snapshot);
-    const fileContent = `---\n${frontmatterBody}---\n\n${note.content}`;
-
-    await workspace.fs.writeFile(
-      fileUri,
-      new TextEncoder().encode(fileContent),
+    const nextReferences = [...existingReferences, candidateReference];
+    await this.patchFrontmatterSection(
+      note.filePath,
+      'references',
+      (existingEntry) =>
+        this.mergeReferencesSection(existingEntry, nextReferences),
     );
 
-    const nextSnapshot = this.captureFrontmatterSnapshot(frontmatterBody);
-    this.frontmatterCache.set(note.filePath, nextSnapshot);
+    note.references = nextReferences;
+    return 'added';
   }
 
   private buildDeclaredReference(
@@ -1034,11 +993,6 @@ export class NotesService {
     return normalizedAbsolute;
   }
 
-  private parseFrontmatterDate(value: string): Date | undefined {
-    const parsed = new Date(value);
-    return Number.isNaN(parsed.getTime()) ? undefined : parsed;
-  }
-
   private areDeclaredReferencesEqual(
     left: DeclaredReference,
     right: DeclaredReference,
@@ -1065,155 +1019,270 @@ export class NotesService {
     return leftPath === rightPath && leftLine === rightLine;
   }
 
-  private buildFrontmatter(
-    note: Note,
-    snapshot: FrontmatterSnapshot | null,
-  ): string {
-    const managedSections = this.buildManagedFrontmatterMap(note, {
-      includeCreated: !snapshot && Boolean(note.createdAt),
-      includeUpdated: !snapshot && Boolean(note.updatedAt),
-    });
-
+  private async patchFrontmatterSection(
+    filePath: string,
+    key: 'links' | 'references',
+    buildSection: (existingEntry: string | undefined) => string,
+  ): Promise<void> {
+    const fileUri = Uri.file(filePath);
+    let snapshot = await this.ensureFrontmatterSnapshot(fileUri);
     if (!snapshot) {
-      const body = this.managedFrontmatterOrder
-        .map((key) => managedSections.get(key))
-        .filter((section): section is string => Boolean(section))
-        .join('');
-      return body.length > 0 && !body.endsWith('\n') ? `${body}\n` : body;
+      throw new Error(
+        `Cannot patch frontmatter for ${filePath}: missing snapshot`,
+      );
     }
 
-    const pieces: string[] = [];
-    let cursor = 0;
-    for (const entry of snapshot.entries) {
-      if (entry.start > cursor) {
-        pieces.push(snapshot.raw.slice(cursor, entry.start));
-      }
+    const existingEntry = this.getFrontmatterEntryText(snapshot, key);
+    const nextEntry = buildSection(existingEntry);
 
-      if (
-        this.managedFrontmatterKeys.has(
-          entry.key as (typeof this.managedFrontmatterOrder)[number],
-        )
-      ) {
-        const replacement = managedSections.get(
-          entry.key as (typeof this.managedFrontmatterOrder)[number],
-        );
-        if (replacement) {
-          pieces.push(replacement);
-          managedSections.delete(
-            entry.key as (typeof this.managedFrontmatterOrder)[number],
-          );
-        } else if (entry.key === 'created' || entry.key === 'updated') {
-          pieces.push(snapshot.raw.slice(entry.start, entry.end));
-        }
-      } else {
-        pieces.push(snapshot.raw.slice(entry.start, entry.end));
-      }
-
-      cursor = entry.end;
+    const fileContent = await readFileContent(fileUri);
+    const match = fileContent.match(this.frontmatterRegex);
+    if (!match || match.index === undefined) {
+      throw new Error(
+        `Cannot patch frontmatter for ${filePath}: delimiters missing`,
+      );
     }
 
-    if (cursor < snapshot.raw.length) {
-      pieces.push(snapshot.raw.slice(cursor));
-    }
+    const nextFrontmatterBody = this.replaceFrontmatterSection(
+      snapshot,
+      key,
+      nextEntry,
+    );
 
-    const remainingManaged: string[] = [];
-    for (const key of this.managedFrontmatterOrder) {
-      const section = managedSections.get(key);
-      if (section) {
-        remainingManaged.push(section);
-      }
-    }
+    const prefix = fileContent.slice(0, match.index);
+    const remainder = fileContent.slice(match.index + match[0].length);
+    const updatedContent = `${prefix}---\n${nextFrontmatterBody}---\n${remainder}`;
 
-    if (remainingManaged.length > 0) {
-      if (pieces.length > 0 && !pieces[pieces.length - 1].endsWith('\n')) {
-        pieces.push('\n');
-      }
-      pieces.push(remainingManaged.join(''));
-    }
+    await workspace.fs.writeFile(
+      fileUri,
+      new TextEncoder().encode(updatedContent),
+    );
 
-    const merged = pieces.join('');
-    if (merged.length === 0) {
-      return '';
-    }
-    return merged.endsWith('\n') ? merged : `${merged}\n`;
+    snapshot = this.captureFrontmatterSnapshot(nextFrontmatterBody);
+    this.frontmatterCache.set(filePath, snapshot);
   }
 
-  private buildManagedFrontmatterMap(
-    note: Note,
-    options?: {
-      includeCreated: boolean;
-      includeUpdated: boolean;
-    },
-  ): Map<(typeof this.managedFrontmatterOrder)[number], string> {
-    const sections = new Map<
-      (typeof this.managedFrontmatterOrder)[number],
-      string
-    >();
-
-    sections.set('id', `id: ${note.id}\n`);
-    sections.set('title', `title: ${note.title}\n`);
-    const includeCreated = options?.includeCreated ?? false;
-    const includeUpdated = options?.includeUpdated ?? false;
-    const createdAtValue = note.createdAt;
-    if (includeCreated && createdAtValue) {
-      sections.set('created', `created: ${createdAtValue.toISOString()}\n`);
-    }
-    const updatedAtValue = note.updatedAt;
-    if (includeUpdated && updatedAtValue) {
-      sections.set('updated', `updated: ${updatedAtValue.toISOString()}\n`);
-    }
-
-    if (Object.prototype.hasOwnProperty.call(note, 'tags')) {
-      if (note.tags && note.tags.length > 0) {
-        sections.set('tags', `tags: [${note.tags.join(', ')}]\n`);
-      } else {
-        sections.set('tags', 'tags: []\n');
+  private replaceFrontmatterSection(
+    snapshot: FrontmatterSnapshot,
+    key: 'links' | 'references',
+    replacement: string,
+  ): string {
+    const entry = snapshot.entries.find((candidate) => candidate.key === key);
+    if (!entry) {
+      if (snapshot.raw.length === 0) {
+        return replacement;
       }
+      const needsSeparator = !snapshot.raw.endsWith('\n');
+      const separator = needsSeparator ? '\n' : '';
+      return `${snapshot.raw}${separator}${replacement}`;
     }
 
-    if (note.links && note.links.length > 0) {
-      sections.set('links', `links: [${note.links.join(', ')}]\n`);
-    }
-
-    if (note.references && note.references.length > 0) {
-      const serializedRefs = this.serializeReferences(note.references);
-      if (serializedRefs) {
-        sections.set('references', `${serializedRefs}\n`);
-      }
-    }
-
-    if (note.summary) {
-      sections.set('summary', `summary: ${note.summary}\n`);
-    }
-
-    if (note.type && note.type.trim().length > 0) {
-      sections.set('type', `type: ${note.type}\n`);
-    }
-
-    return sections;
+    const before = snapshot.raw.slice(0, entry.start);
+    const after = snapshot.raw.slice(entry.end);
+    return `${before}${replacement}${after}`;
   }
 
-  private serializeReferences(references: DeclaredReference[]): string | null {
-    if (!references || references.length === 0) {
-      return null;
+  private getFrontmatterEntryText(
+    snapshot: FrontmatterSnapshot,
+    key: string,
+  ): string | undefined {
+    const entry = snapshot.entries.find((candidate) => candidate.key === key);
+    if (!entry) {
+      return undefined;
     }
-    const lines: string[] = ['references:'];
+    return snapshot.raw.slice(entry.start, entry.end);
+  }
+
+  private mergeLinksSection(
+    existingEntry: string | undefined,
+    links: string[],
+  ): string {
+    if (!existingEntry) {
+      return this.buildInlineLinksSection(links);
+    }
+
+    if (existingEntry.includes('[')) {
+      return this.appendInlineLinks(existingEntry, links);
+    }
+
+    return this.appendBlockLinks(existingEntry, links);
+  }
+
+  private appendInlineLinks(entryText: string, links: string[]): string {
+    const open = entryText.indexOf('[');
+    const close = entryText.lastIndexOf(']');
+    if (open === -1 || close === -1 || close <= open) {
+      return this.buildInlineLinksSection(links);
+    }
+    const inside = entryText.slice(open + 1, close);
+    const existingCount = this.countCommaSeparatedItems(inside);
+    const additions = links.slice(existingCount);
+    if (additions.length === 0) {
+      return entryText;
+    }
+
+    const needsComma = inside.trim().length > 0;
+    const insertion = `${needsComma ? ', ' : ''}${additions.join(', ')}`;
+    return `${entryText.slice(0, close)}${insertion}${entryText.slice(close)}`;
+  }
+
+  private appendBlockLinks(entryText: string, links: string[]): string {
+    const bulletRegex = /^\s*-\s/gm;
+    const existingCount = (entryText.match(bulletRegex) ?? []).length;
+    const additions = links.slice(existingCount);
+    if (additions.length === 0) {
+      return entryText;
+    }
+
+    const indentMatch = entryText.match(/\n(\s+)-/);
+    const indent = indentMatch ? indentMatch[1] : '  ';
+    const trimmed = entryText.endsWith('\n')
+      ? entryText.slice(0, -1)
+      : entryText;
+    const extra = additions.map((link) => `\n${indent}- ${link}`).join('');
+    return `${trimmed}${extra}\n`;
+  }
+
+  private buildInlineLinksSection(links: string[]): string {
+    return `links: [${links.join(', ')}]\n`;
+  }
+
+  private mergeReferencesSection(
+    existingEntry: string | undefined,
+    references: DeclaredReference[],
+  ): string {
+    if (!existingEntry) {
+      return this.buildStructuredReferences(references);
+    }
+
+    if (existingEntry.includes('file:')) {
+      return this.appendStructuredReferences(existingEntry, references);
+    }
+
+    if (existingEntry.includes('[')) {
+      return this.appendInlineReferences(existingEntry, references);
+    }
+
+    return this.appendCompactReferences(existingEntry, references);
+  }
+
+  private appendInlineReferences(
+    entryText: string,
+    references: DeclaredReference[],
+  ): string {
+    const open = entryText.indexOf('[');
+    const close = entryText.lastIndexOf(']');
+    if (open === -1 || close === -1 || close <= open) {
+      return this.buildStructuredReferences(references);
+    }
+    const inside = entryText.slice(open + 1, close);
+    const existingCount = this.countCommaSeparatedItems(inside);
+    const additions = references.slice(existingCount);
+    if (additions.length === 0) {
+      return entryText;
+    }
+
+    const formatted = additions.map((ref) => this.formatCompactReference(ref));
+    const needsComma = inside.trim().length > 0;
+    const insertion = `${needsComma ? ', ' : ''}${formatted.join(', ')}`;
+    return `${entryText.slice(0, close)}${insertion}${entryText.slice(close)}`;
+  }
+
+  private appendCompactReferences(
+    entryText: string,
+    references: DeclaredReference[],
+  ): string {
+    const bulletRegex = /^\s*-\s/gm;
+    const existingCount = (entryText.match(bulletRegex) ?? []).length;
+    const additions = references.slice(existingCount);
+    if (additions.length === 0) {
+      return entryText;
+    }
+
+    const indentMatch = entryText.match(/\n(\s+)-/);
+    const indent = indentMatch ? indentMatch[1] : '  ';
+    const trimmed = entryText.endsWith('\n')
+      ? entryText.slice(0, -1)
+      : entryText;
+    const extra = additions
+      .map((ref) => `\n${indent}- ${this.formatCompactReference(ref)}`)
+      .join('');
+    return `${trimmed}${extra}\n`;
+  }
+
+  private appendStructuredReferences(
+    entryText: string,
+    references: DeclaredReference[],
+  ): string {
+    const existingCount = (entryText.match(/-\s*file:/g) ?? []).length;
+    const additions = references.slice(existingCount);
+    if (additions.length === 0) {
+      return entryText;
+    }
+
+    const indentMatch = entryText.match(/\n(\s+)-\s*file:/);
+    const indent = indentMatch ? indentMatch[1] : '  ';
+    const detailIndent = `${indent}  `;
+    const trimmed = entryText.endsWith('\n')
+      ? entryText.slice(0, -1)
+      : entryText;
+    let result = trimmed;
+    for (const ref of additions) {
+      result += `\n${indent}- file: ${ref.file}`;
+      if (typeof ref.line === 'number' && Number.isFinite(ref.line)) {
+        result += `\n${detailIndent}line: ${ref.line}`;
+      }
+      if (typeof ref.endLine === 'number' && Number.isFinite(ref.endLine)) {
+        result += `\n${detailIndent}endLine: ${ref.endLine}`;
+      }
+      if (ref.symbol) {
+        result += `\n${detailIndent}symbol: ${ref.symbol}`;
+      }
+    }
+    return `${result}\n`;
+  }
+
+  private buildStructuredReferences(references: DeclaredReference[]): string {
+    const lines = ['references:'];
     for (const ref of references) {
       lines.push(`  - file: ${ref.file}`);
-      if (ref.line !== undefined) {
+      if (typeof ref.line === 'number' && Number.isFinite(ref.line)) {
         lines.push(`    line: ${ref.line}`);
       }
-      if (ref.endLine !== undefined) {
+      if (typeof ref.endLine === 'number' && Number.isFinite(ref.endLine)) {
         lines.push(`    endLine: ${ref.endLine}`);
       }
       if (ref.symbol) {
         lines.push(`    symbol: ${ref.symbol}`);
       }
     }
-    return lines.join('\n');
+    return `${lines.join('\n')}\n`;
   }
 
-  // (removed extractPreservedFrontmatter helper - merging handled in buildFrontmatter)
+  private formatCompactReference(ref: DeclaredReference): string {
+    let value = ref.file;
+    if (typeof ref.line === 'number' && Number.isFinite(ref.line)) {
+      value += `#${ref.line}`;
+      if (typeof ref.endLine === 'number' && Number.isFinite(ref.endLine)) {
+        value += `:${ref.endLine}`;
+      }
+    }
+    if (ref.symbol) {
+      value += `@${ref.symbol}`;
+    }
+    return value;
+  }
+
+  private countCommaSeparatedItems(value: string): number {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return 0;
+    }
+    return trimmed
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0).length;
+  }
 
   private async ensureFrontmatterSnapshot(
     fileUri: Uri,
