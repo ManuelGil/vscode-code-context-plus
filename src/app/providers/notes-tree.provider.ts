@@ -95,10 +95,17 @@ export class NotesTreeProvider implements TreeDataProvider<NotesTreeNode> {
     if (element.type === 'note') {
       const item = new TreeItem(
         this.getNodeDisplayLabel(element.title, element.id),
-        TreeItemCollapsibleState.Collapsed,
+        element.hasRelations
+          ? TreeItemCollapsibleState.Collapsed
+          : TreeItemCollapsibleState.None,
       );
       item.resourceUri = element.uri;
       item.iconPath = new ThemeIcon('file');
+      item.command = {
+        command: 'vscode.open',
+        title: l10n.t('Open'),
+        arguments: [element.uri],
+      };
       return item;
     }
 
@@ -162,11 +169,24 @@ export class NotesTreeProvider implements TreeDataProvider<NotesTreeNode> {
    * @private
    */
   private toSortedRootNodes(notes: Note[]): NoteTreeNode[] {
+    const linkedIds = new Set<string>();
+    for (const note of notes) {
+      for (const linkId of note.links ?? []) {
+        const trimmed = linkId.trim();
+        if (trimmed) {
+          linkedIds.add(trimmed);
+        }
+      }
+    }
+
     const nodes = notes.map((note) => ({
       type: 'note' as const,
       id: note.id,
       uri: Uri.file(note.filePath),
       title: note.title,
+      hasRelations:
+        (note.links ?? []).some((linkId) => linkId.trim().length > 0) ||
+        (note.id.trim().length > 0 && linkedIds.has(note.id.trim())),
     }));
 
     return nodes.sort((a, b) => {

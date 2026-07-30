@@ -54,7 +54,7 @@ export function parseDeclaredReferencesFromFrontmatter(
   // If dialect parser yielded a straightforward string list, treat each entry
   // as a compact reference item (may contain `#<line>` suffix). However, the
   // restricted dialect will sometimes surface structured mapping rows as
-  // string list items (e.g. `- file: path`) — detect that pattern and fall
+  // string list items (e.g. `- file: path`) - detect that pattern and fall
   // through to the targeted structured-mapping parser below instead of
   // misinterpreting `file: ...` as a literal path.
   if (Object.prototype.hasOwnProperty.call(parsed.lists, 'references')) {

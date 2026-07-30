@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Improves navigation in the Active Context view by allowing notes to be opened directly from the explorer.
+- Shows expandable items in the Active Context view only when related context exists.
+- Displays note titles instead of internal note IDs in context trail breadcrumbs.
+
+### Fixed
+
+- Corrects parsing of YAML block scalar values (`>` and `|`) in frontmatter, allowing contextual summaries to render correctly.
+- Corrects the hover message that reports how many notes reference the current line.
+- Restores accented characters and punctuation in the Spanish localization.
+
 ## [1.3.0] - 2026-06-04
 
 ### Added
@@ -59,7 +71,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release of CodeContext+ extension
 
 [Unreleased]: https://github.com/ManuelGil/vscode-code-context-plus/compare/v1.3.0...HEAD
-[1.3.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.3.0
-[1.2.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.2.0
-[1.1.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.1.0
+[1.3.0]: https://github.com/ManuelGil/vscode-code-context-plus/compare/v1.2.0...v1.3.0
+[1.2.0]: https://github.com/ManuelGil/vscode-code-context-plus/compare/v1.1.0...v1.2.0
+[1.1.0]: https://github.com/ManuelGil/vscode-code-context-plus/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/ManuelGil/vscode-code-context-plus/releases/tag/v1.0.0

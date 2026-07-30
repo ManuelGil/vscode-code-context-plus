@@ -40,12 +40,58 @@ function isTopLevelKeyLine(line: string): boolean {
   return /^[A-Za-z_][\w-]*\s*:/.test(line);
 }
 
+/** Matches a YAML block scalar indicator (`>`, `|`) with optional chomping (`-`, `+`). */
+const BLOCK_SCALAR_INDICATOR = /^([>|])[-+]?$/;
+
+/**
+ * Collects the indented body of a block scalar starting at `startIndex`.
+ *
+ * @returns The folded value and the index of the last consumed line.
+ */
+function readBlockScalar(
+  lines: readonly string[],
+  startIndex: number,
+  style: '>' | '|',
+): { value: string; lastIndex: number } {
+  const bodyLines: string[] = [];
+  let index = startIndex;
+
+  for (; index < lines.length; index++) {
+    const line = lines[index];
+
+    if (line.trim() === '') {
+      bodyLines.push('');
+      continue;
+    }
+
+    // A non-indented line ends the block (next top-level key or trailing junk).
+    if (!/^\s+/.test(line)) {
+      break;
+    }
+
+    bodyLines.push(line.trim());
+  }
+
+  while (bodyLines.length > 0 && bodyLines[bodyLines.length - 1] === '') {
+    bodyLines.pop();
+  }
+
+  // Folded blocks read as one line; literal blocks keep their line breaks.
+  const value =
+    style === '>'
+      ? bodyLines.join(' ').replace(/\s+/g, ' ').trim()
+      : bodyLines.join('\n');
+
+  return { value, lastIndex: index - 1 };
+}
+
 /**
  * Parses a *restricted* frontmatter dialect used by CodeContext+.
  *
  * Goals:
  * - **Strict internally, tolerant externally**: accept safe human variants, normalize into deterministic structures.
- * - **Not a YAML engine**: only supports top-level `key: value` and top-level lists for known keys
+ * - **Not a YAML engine**: only supports top-level `key: value`, top-level block scalars
+ *   (`key: >` folded to one line, `key: |` keeping line breaks), and top-level lists for known keys
  *   (`key: [a, b]`, `key: a`, or `key:\n  - a\n  - b`).
  * - Detect unsupported nested structures and surface warnings (does not throw).
  */
@@ -90,6 +136,21 @@ export function parseFrontmatterDialect(
     const rest = restRaw.trim();
 
     if (!key) {
+      continue;
+    }
+
+    // Accept: key: >   /   key: |   (block scalar spanning the indented lines below)
+    const blockScalar = listKeys.has(key)
+      ? null
+      : BLOCK_SCALAR_INDICATOR.exec(rest);
+    if (blockScalar) {
+      const { value, lastIndex } = readBlockScalar(
+        lines,
+        i + 1,
+        blockScalar[1] as '>' | '|',
+      );
+      scalars[key] = value;
+      i = lastIndex;
       continue;
     }
 

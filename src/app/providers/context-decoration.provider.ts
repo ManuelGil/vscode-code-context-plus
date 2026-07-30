@@ -28,6 +28,7 @@ type ClickableAfterAttachment = ThemableDecorationAttachmentRenderOptions & {
 
 function escapeMarkdownInline(text: string): string {
   return text
+    .replace(/\s*\n\s*/g, ' ')
     .replace(/\\/g, '\\\\')
     .replace(/\*/g, '\\*')
     .replace(/_/g, '\\_')
@@ -247,14 +248,17 @@ export class ContextDecorationProvider {
     const md = new MarkdownString(undefined, true);
     md.isTrusted = true;
 
-    md.appendMarkdown(
-      `💡 **${l10n.t('{0} {1} reference this line', total, total === 1 ? 'note' : 'notes')}**\n\n`,
-    );
+    const headline =
+      total === 1
+        ? l10n.t('1 note references this line')
+        : l10n.t('{0} notes reference this line', String(total));
+
+    md.appendMarkdown(`💡 **${headline}**\n\n`);
 
     for (const n of notes) {
       md.appendMarkdown(`\n• **${escapeMarkdownInline(n.label)}**`);
       if (n.refs !== undefined) {
-        md.appendMarkdown(` — ${l10n.t('{0} references', String(n.refs))}`);
+        md.appendMarkdown(` - ${l10n.t('{0} references', String(n.refs))}`);
       }
       if (n.summary) {
         md.appendMarkdown(`  \n  _${escapeMarkdownInline(n.summary)}_`);

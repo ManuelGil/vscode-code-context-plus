@@ -865,7 +865,8 @@ export class NotesController {
       if (note) {
         pushContext({ id: note.id, uri, title: note.title, type: note.type });
         const trail = getTrail(5)
-          .map((t) => t.id)
+          .map((t) => t.title?.trim() || t.id.trim())
+          .filter((label) => label.length > 0)
           .join(' ← ');
         if (trail) {
           // transient breadcrumb in status bar
@@ -883,7 +884,8 @@ export class NotesController {
     if (note) {
       pushContext({ id: note.id, uri, title: note.title, type: note.type });
       const trail = getTrail(5)
-        .map((t) => t.id)
+        .map((t) => t.title?.trim() || t.id.trim())
+        .filter((label) => label.length > 0)
         .join(' ← ');
       if (trail) {
         window.setStatusBarMessage(`Context trail: ${trail}`, 5000);

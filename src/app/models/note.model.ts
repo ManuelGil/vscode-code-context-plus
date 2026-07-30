@@ -74,6 +74,8 @@ export type NoteTreeNode = {
   id: string;
   uri: Uri;
   title?: string;
+  /** Whether the note declares links or is the target of one (drives collapsible state). */
+  hasRelations?: boolean;
 };
 
 /** Collapsible group for outgoing links vs backlinks under a note row. */
@@ -140,7 +142,7 @@ export type ResolvedReferencesResult = {
 
 /**
  * Per-operation shared state: avoids repeated filesystem scans within one orchestrated call.
- * Not a global cache — discard after the operation completes.
+ * Not a global cache - discard after the operation completes.
  */
 export type OperationContext = {
   noteUris?: Uri[];
