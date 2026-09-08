@@ -191,7 +191,7 @@
 		"prepare": "husky"
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.5.7",
+		"@biomejs/biome": "2.5.12",
 		"@commitlint/cli": "^19.8.1",
 		"@commitlint/config-conventional": "^19.8.1",
 		"@types/mocha": "^10.0.10",
@@ -201,7 +201,7 @@
 		"@vscode/l10n-dev": "^0.0.35",
 		"@vscode/test-cli": "^0.0.15",
 		"@vscode/test-electron": "^2.5.2",
-		"esbuild": "^0.28.1",
+		"esbuild": "^0.28.2",
 		"fast-glob": "^3.3.3",
 		"husky": "^9.1.7",
 		"lint-staged": "^16.4.0",
@@ -211,7 +211,7 @@
 	"dependencies": {
 		"@supercharge/promise-pool": "^3.3.0",
 		"fast-glob": "^3.3.3",
-		"ignore": "^7.0.6",
+		"ignore": "^7.0.8",
 		"mustache": "^4.2.0",
 		"vscode-marketplace-client": "^1.2.5"
 	},
