@@ -199,9 +199,44 @@ references:
     line: 42
 ```
 
-Paths are resolved relative to the workspace folder, and absolute paths are accepted as well. A reference with a line marks that line; a reference without one applies to the file as a whole and surfaces at its first line.
+Paths are resolved relative to the workspace folder, and absolute paths are accepted as well. A reference with a line marks that line; a reference without one applies to the file as a whole and surfaces at its first line. A range marks the code it spans, and is found from any line inside it:
 
-You do not have to write references by hand. Put the cursor on the line that needs context, run **Add reference for current location**, and pick where it should be recorded - selecting several destinations at once if the same line matters in more than one place. Entries that already exist are reported rather than duplicated.
+```yaml
+references:
+  - file: src/auth/auth.service.ts
+    line: 42
+    endLine: 58
+```
+
+Compact entries understand the same shapes - `#42`, `#L42`, `#42-58`, `#42:58` - and can name a symbol with `@`, as in `src/auth/auth.service.ts#42@AuthService.login`.
+
+### Keeping references pointing at the right code
+
+A line number says where code was, not what it is, so a reference records two more things when it is created: the text of the line it points at, and the symbol that contains it.
+
+```yaml
+references:
+  - file: src/auth/auth.service.ts
+    line: 42
+    symbol: AuthService.login
+    anchor: const token = this.issue(user);
+```
+
+Nothing is written back when the code moves. References are resolved against the file as it is now, every time they are used:
+
+1. **the symbol**, asked of whatever language extension owns the file. This is what survives code being moved, cut and pasted, or a file being renamed - and it is the one step that depends on the language: a file whose language has no symbol provider simply skips it.
+2. **the anchor**, matched against the current text, ignoring indentation and whitespace runs. This works in every language and is what survives lines being inserted or deleted above the reference.
+3. **the position**, when there is nothing else to go on.
+
+When the evidence runs out, the reference says so instead of guessing. Code that no longer exists, a symbol that matches three overloads, an anchor that now appears twice - all of these are reported as unresolved, with the reason, and the file opens at its top rather than at a plausible-looking wrong line. Two locations that are equally likely is not a robustness problem to paper over; it is a conflict only the person who wrote the note can settle.
+
+What this does *not* cover is worth being explicit about:
+
+- rewriting the referenced line itself defeats the anchor, by design - the code the note described is gone;
+- symbol resolution is only as good as the language extension behind it, and a file with a syntax error can produce a partial or wrong symbol tree, which is why a symbol result is never trusted over an anchor that disagrees with it;
+- a file that moved is recovered only when the symbol or the filename identifies it uniquely in the workspace.
+
+You do not have to write references by hand. Put the cursor on the line that needs context - or select the region that does - run **Add reference for current location**, and pick where it should be recorded, selecting several destinations at once if the same code matters in more than one place. Entries that already exist are reported rather than duplicated, and the note keeps whichever style it already used.
 
 ### Connecting related context
 

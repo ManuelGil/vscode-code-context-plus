@@ -1,19 +1,29 @@
-import { FileSystemError, Uri, workspace } from 'vscode';
+import { FileSystemError, type TextDocument, Uri, workspace } from 'vscode';
 
 import { ExtensionConfig } from '../configs';
 import {
   basenameFromFsPath,
   findFiles,
   getWorkspaceFolderUri,
+  normalizeDeclaredReference,
+  normalizeReferenceLine,
   normalizeReferencePath,
   parseDeclaredReferencesFromFrontmatter,
   parseFrontmatterDialect,
+  quoteYamlScalar,
+  type ReferenceResolution,
   readFileContent,
+  resolveDeclaredReference,
+  resolveDeclaredReferenceInDocument,
+  resolveReferenceFileCandidates,
   stripYamlQuotes,
   toPosixPath,
+  type UnresolvedReference,
 } from '../helpers';
 import type {
   DeclaredReference,
+  DeclaredReferenceLocation,
+  FileContextEntry,
   FrontmatterIdentity,
   Note,
   NotesIdentityValidationError,
@@ -313,9 +323,14 @@ export class NotesService {
   /**
    * Resolves `references` declared in frontmatter for the note identified by `noteId`.
    *
-   * Constraints:
-   * - Paths are resolved relative to {@link getWorkspaceFolderUri} for the note file (multi-root aware).
-   * - Absolute `file` paths use `Uri.file` only (no alias or glob resolution).
+   * @remarks
+   * Resolution is derived, never written back: a reference whose code moved is reported at its
+   * current location and the note on disk is left untouched. Paths are resolved relative to
+   * {@link getWorkspaceFolderUri} for the note file (multi-root aware) and absolute `file`
+   * paths are taken literally.
+   *
+   * References that cannot be located without guessing between candidates are returned as
+   * unresolved rather than pointed at whichever candidate came first.
    *
    * @throws When identity validation fails irrecoverably or when the source note cannot be read.
    */
@@ -323,13 +338,13 @@ export class NotesService {
     noteId: string,
     operationCtx?: OperationContext,
   ): Promise<{
-    valid: { file: string; uri: Uri; line?: number }[];
-    broken: { file: string; reason: string }[];
+    resolved: Extract<ReferenceResolution, { status: 'resolved' }>[];
+    unresolved: UnresolvedReference[];
   }> {
     const ctx = operationCtx ?? {};
     const trimmedNoteId = noteId.trim();
     if (!trimmedNoteId) {
-      return { valid: [], broken: [] };
+      return { resolved: [], unresolved: [] };
     }
 
     const validation = await this.validateNotesIdentityCore(ctx);
@@ -337,17 +352,17 @@ export class NotesService {
       (e) => e.type === 'duplicated-id' && e.id === trimmedNoteId,
     );
     if (duplicate) {
-      return { valid: [], broken: [] };
+      return { resolved: [], unresolved: [] };
     }
 
     const sourceUri = validation.index.get(trimmedNoteId);
     if (!sourceUri) {
-      return { valid: [], broken: [] };
+      return { resolved: [], unresolved: [] };
     }
 
     const rootFolderUri = getWorkspaceFolderUri(this.config, sourceUri);
     if (!rootFolderUri) {
-      return { valid: [], broken: [] };
+      return { resolved: [], unresolved: [] };
     }
 
     let noteMarkdown = '';
@@ -361,82 +376,40 @@ export class NotesService {
       );
     }
 
-    const normalizedMarkdown = noteMarkdown.replace(/\r\n/g, '\n');
-    let frontmatter = '';
-    if (normalizedMarkdown.startsWith('---\n')) {
-      const frontmatterEndIndex = normalizedMarkdown.indexOf('\n---\n', 4);
-      if (frontmatterEndIndex !== -1) {
-        frontmatter = normalizedMarkdown.slice(4, frontmatterEndIndex);
-      }
-    }
-    const declarations = parseDeclaredReferencesFromFrontmatter(frontmatter);
-
-    const resolutionResults = await Promise.all(
-      declarations.map(async (ref) => {
-        const candidateUris = this.resolveWorkspaceReferenceUris(
-          rootFolderUri,
-          ref.file,
-        );
-        let uri = candidateUris[0] ?? null;
-
-        for (const candidateUri of candidateUris) {
-          try {
-            await workspace.fs.stat(candidateUri);
-            uri = candidateUri;
-            break;
-          } catch {
-            // Try the next candidate.
-          }
-        }
-
-        if (!uri) {
-          return {
-            ref,
-            outcome: 'invalid' as const,
-          };
-        }
-
-        try {
-          await workspace.fs.stat(uri);
-          const line =
-            ref.line !== undefined &&
-            Number.isInteger(ref.line) &&
-            ref.line >= 1
-              ? ref.line
-              : undefined;
-          return {
-            ref,
-            outcome: 'ok' as const,
-            uri,
-            line,
-          };
-        } catch {
-          return {
-            ref,
-            outcome: 'missing' as const,
-          };
-        }
-      }),
+    const declarations = parseDeclaredReferencesFromFrontmatter(
+      this.extractFrontmatter(noteMarkdown),
     );
 
-    const valid: { file: string; uri: Uri; line?: number }[] = [];
-    const broken: { file: string; reason: string }[] = [];
+    const resolutions = await Promise.all(
+      declarations.map((ref) =>
+        resolveDeclaredReference(ref, {
+          workspaceRoot: rootFolderUri,
+          notesDir: this.notesDir,
+        }),
+      ),
+    );
 
-    for (const result of resolutionResults) {
-      if (result.outcome === 'ok') {
-        valid.push({
-          file: result.ref.file,
-          uri: result.uri,
-          line: result.line,
-        });
-      } else if (result.outcome === 'invalid') {
-        broken.push({ file: result.ref.file, reason: 'Invalid path' });
-      } else {
-        broken.push({ file: result.ref.file, reason: 'File not found' });
-      }
+    return {
+      resolved: resolutions.filter(
+        (r): r is Extract<ReferenceResolution, { status: 'resolved' }> =>
+          r.status === 'resolved',
+      ),
+      unresolved: resolutions.filter(
+        (r): r is UnresolvedReference => r.status === 'unresolved',
+      ),
+    };
+  }
+
+  /** Extracts the raw YAML frontmatter body from note markdown (empty string when absent). */
+  private extractFrontmatter(markdown: string): string {
+    const normalized = String(markdown ?? '').replace(/\r\n/g, '\n');
+
+    if (!normalized.startsWith('---\n')) {
+      return '';
     }
 
-    return { valid, broken };
+    const endIndex = normalized.indexOf('\n---\n', 4);
+    return endIndex === -1 ? '' : normalized.slice(4, endIndex);
   }
 
   /**
@@ -500,74 +473,26 @@ export class NotesService {
   }
 
   /**
-   * Returns unique 1-based line numbers from frontmatter `references` that target `fileUri`.
-   * References without a line imply line `1` (file-level context). Sorted ascending.
+   * Resolves every declared reference that targets `fileUri` to its current position.
+   *
+   * @remarks
+   * This is the single scan behind decorations, line context and the context pickers: one pass
+   * over the notes, one open document, and one resolution per reference. Entries that could not
+   * be located keep their note and carry the reason, so the caller can report a conflict instead
+   * of pretending the reference points somewhere.
    */
-  async getContextDecorationLinesForFile(fileUri: Uri): Promise<number[]> {
+  async getContextEntriesForFile(fileUri: Uri): Promise<FileContextEntry[]> {
     const targetPaths = this.getReferenceTargetPaths(fileUri);
-
     const noteUris = await this.discoverNoteFileUrisThroughContext();
-    const lines = new Set<number>();
 
-    for (const noteUri of noteUris) {
-      const note = await this.getNote(noteUri);
-      if (!note) {
-        continue;
-      }
-
-      const references = note.references ?? [];
-      if (references.length === 0) {
-        continue;
-      }
-
-      const rootFolderUri = getWorkspaceFolderUri(this.config, noteUri);
-      if (!rootFolderUri) {
-        continue;
-      }
-
-      for (const ref of references) {
-        if (!this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
-          continue;
-        }
-
-        const referenceLine =
-          typeof ref.line === 'number' &&
-          Number.isInteger(ref.line) &&
-          ref.line >= 1
-            ? ref.line
-            : 1;
-        lines.add(referenceLine);
-      }
+    let document: TextDocument | undefined;
+    try {
+      document = await workspace.openTextDocument(fileUri);
+    } catch {
+      document = undefined;
     }
 
-    return [...lines].sort((a, b) => a - b);
-  }
-
-  /**
-   * Returns notes grouped by 1-based reference line for `fileUri` (only keys in `oneBasedLines`).
-   * File-level references (no line) count as line `1`.
-   */
-  async getNotesForFileGroupedByReferenceLine(
-    fileUri: Uri,
-    oneBasedLines: readonly number[],
-  ): Promise<Map<number, { id: string; uri: Uri; title?: string }[]>> {
-    const interest = new Set(oneBasedLines.filter((l) => l >= 1));
-    const buckets = new Map<
-      number,
-      Map<string, { id: string; uri: Uri; title?: string }>
-    >();
-    for (const line of interest) {
-      buckets.set(line, new Map());
-    }
-
-    const out = new Map<number, { id: string; uri: Uri; title?: string }[]>();
-    if (interest.size === 0) {
-      return out;
-    }
-
-    const targetPaths = this.getReferenceTargetPaths(fileUri);
-
-    const noteUris = await this.discoverNoteFileUrisThroughContext();
+    const entries: FileContextEntry[] = [];
 
     for (const noteUri of noteUris) {
       const note = await this.getNote(noteUri);
@@ -589,37 +514,104 @@ export class NotesService {
         note.id?.trim() ||
         basenameFromFsPath(noteUri.fsPath).replace(/\.md$/i, '');
       const titleTrim = note.title?.trim();
+      const noteRef = {
+        id,
+        uri: noteUri,
+        ...(titleTrim ? { title: titleTrim } : {}),
+      };
 
       for (const ref of references) {
         if (!this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
           continue;
         }
 
-        const effectiveLine =
-          typeof ref.line === 'number' &&
-          Number.isInteger(ref.line) &&
-          ref.line >= 1
-            ? ref.line
-            : 1;
-        if (!interest.has(effectiveLine)) {
+        if (!document) {
+          // The file could not be opened (binary, removed mid-scan): keep the declaration.
+          entries.push({ note: noteRef, ref, issue: 'file-not-found' });
           continue;
         }
 
-        const bucket = buckets.get(effectiveLine);
-        if (!bucket) {
-          continue;
-        }
+        const resolution = await resolveDeclaredReferenceInDocument(
+          ref,
+          document,
+        );
 
-        const dedupeKey = toPosixPath(noteUri.fsPath);
-        if (bucket.has(dedupeKey)) {
-          continue;
-        }
+        entries.push(
+          resolution.status === 'resolved'
+            ? {
+                note: noteRef,
+                ref,
+                startLine: resolution.startLine,
+                endLine: resolution.endLine,
+                strategy: resolution.strategy,
+                ...(resolution.movedFromLine !== undefined
+                  ? { movedFromLine: resolution.movedFromLine }
+                  : {}),
+              }
+            : { note: noteRef, ref, issue: resolution.issue },
+        );
+      }
+    }
 
-        bucket.set(dedupeKey, {
-          id,
-          uri: noteUri,
-          ...(titleTrim ? { title: titleTrim } : {}),
-        });
+    return entries;
+  }
+
+  /**
+   * Returns unique 1-based line numbers where context should be surfaced for `fileUri`.
+   *
+   * @remarks
+   * Lines are the *resolved* ones, so a note whose code moved marks where that code is now.
+   * File-level references surface at line `1`. References that could not be located are not
+   * marked at all rather than marked in the wrong place. Sorted ascending.
+   */
+  async getContextDecorationLinesForFile(fileUri: Uri): Promise<number[]> {
+    const entries = await this.getContextEntriesForFile(fileUri);
+    const lines = new Set<number>();
+
+    for (const entry of entries) {
+      if (entry.startLine !== undefined) {
+        lines.add(entry.startLine);
+      }
+    }
+
+    return [...lines].sort((a, b) => a - b);
+  }
+
+  /**
+   * Returns notes grouped by resolved 1-based line for `fileUri` (only keys in `oneBasedLines`).
+   */
+  async getNotesForFileGroupedByReferenceLine(
+    fileUri: Uri,
+    oneBasedLines: readonly number[],
+  ): Promise<Map<number, { id: string; uri: Uri; title?: string }[]>> {
+    const interest = new Set(oneBasedLines.filter((l) => l >= 1));
+    const out = new Map<number, { id: string; uri: Uri; title?: string }[]>();
+
+    if (interest.size === 0) {
+      return out;
+    }
+
+    const buckets = new Map<
+      number,
+      Map<string, { id: string; uri: Uri; title?: string }>
+    >();
+    for (const line of interest) {
+      buckets.set(line, new Map());
+    }
+
+    for (const entry of await this.getContextEntriesForFile(fileUri)) {
+      if (entry.startLine === undefined || !interest.has(entry.startLine)) {
+        continue;
+      }
+
+      const bucket = buckets.get(entry.startLine);
+      if (!bucket) {
+        continue;
+      }
+
+      const dedupeKey = toPosixPath(entry.note.uri.fsPath);
+      if (!bucket.has(dedupeKey)) {
+        bucket.set(dedupeKey, entry.note);
       }
     }
 
@@ -637,65 +629,34 @@ export class NotesService {
   }
 
   /**
-   * Notes whose frontmatter references target `fileUri` at the given 1-based line (or file-level at line 1).
+   * Notes whose references cover `fileUri` at the given 1-based line.
+   *
+   * @remarks
+   * A range reference matches every line it spans, not just its first, so context attached to a
+   * function is found from anywhere inside it.
    */
   async getNotesByFileReferenceAtLine(
     fileUri: Uri,
     line: number,
   ): Promise<{ notes: { id: string; uri: Uri; title?: string }[] }> {
-    const targetPaths = this.getReferenceTargetPaths(fileUri);
-    const noteUris = await this.discoverNoteFileUrisThroughContext();
     const notesByPath = new Map<
       string,
       { id: string; uri: Uri; title?: string }
     >();
 
-    for (const noteUri of noteUris) {
-      const note = await this.getNote(noteUri);
-      if (!note) {
+    for (const entry of await this.getContextEntriesForFile(fileUri)) {
+      if (entry.startLine === undefined) {
         continue;
       }
 
-      const references = note.references ?? [];
-      if (references.length === 0) {
+      const endLine = entry.endLine ?? entry.startLine;
+      if (line < entry.startLine || line > endLine) {
         continue;
       }
 
-      const rootFolderUri = getWorkspaceFolderUri(this.config, noteUri);
-      if (!rootFolderUri) {
-        continue;
-      }
-
-      const id =
-        note.id?.trim() ||
-        basenameFromFsPath(noteUri.fsPath).replace(/\.md$/i, '');
-      const titleTrim = note.title?.trim();
-
-      for (const ref of references) {
-        if (!this.referenceDeclaresTarget(ref, rootFolderUri, targetPaths)) {
-          continue;
-        }
-
-        const effectiveLine =
-          typeof ref.line === 'number' &&
-          Number.isInteger(ref.line) &&
-          ref.line >= 1
-            ? ref.line
-            : 1;
-        if (effectiveLine !== line) {
-          continue;
-        }
-
-        const dedupeKey = toPosixPath(noteUri.fsPath);
-        if (notesByPath.has(dedupeKey)) {
-          continue;
-        }
-
-        notesByPath.set(dedupeKey, {
-          id,
-          uri: noteUri,
-          ...(titleTrim ? { title: titleTrim } : {}),
-        });
+      const dedupeKey = toPosixPath(entry.note.uri.fsPath);
+      if (!notesByPath.has(dedupeKey)) {
+        notesByPath.set(dedupeKey, entry.note);
       }
     }
 
@@ -929,12 +890,22 @@ export class NotesService {
     return 'added';
   }
 
+  /**
+   * Appends a code reference to a note, preserving the note's existing frontmatter style.
+   *
+   * @param note Target note.
+   * @param targetFileUri File the reference points at.
+   * @param location Position and identity evidence captured from the editor.
+   */
   async addReferenceForLocation(
     note: Note,
     targetFileUri: Uri,
-    line?: number,
+    location?: DeclaredReferenceLocation,
   ): Promise<'added' | 'duplicate'> {
-    const candidateReference = this.buildDeclaredReference(targetFileUri, line);
+    const candidateReference = this.buildDeclaredReference(
+      targetFileUri,
+      location,
+    );
     const existingReferences = note.references ?? [];
 
     const alreadyDeclared = existingReferences.some((ref) =>
@@ -959,18 +930,22 @@ export class NotesService {
 
   private buildDeclaredReference(
     fileUri: Uri,
-    line?: number,
+    location?: DeclaredReferenceLocation,
   ): DeclaredReference {
-    const referencePath = this.getReferencePathForUri(fileUri);
-    const normalizedLine =
-      typeof line === 'number' && Number.isInteger(line) && line > 0
-        ? line
-        : undefined;
-
-    return {
-      file: referencePath,
-      ...(normalizedLine ? { line: normalizedLine } : {}),
+    const candidate: DeclaredReference = {
+      file: this.getReferencePathForUri(fileUri),
+      ...(location ?? {}),
     };
+
+    const normalized = normalizeDeclaredReference(candidate);
+
+    if (!normalized) {
+      throw new Error(
+        `Unable to build a reference for ${fileUri.fsPath}: normalization failed`,
+      );
+    }
+
+    return normalized;
   }
 
   private getReferencePathForUri(fileUri: Uri): string {
@@ -993,6 +968,14 @@ export class NotesService {
     return normalizedAbsolute;
   }
 
+  /**
+   * Whether two references denote the same declaration.
+   *
+   * @remarks
+   * Identity is literal - same file, same span, same symbol - so that adding a reference to a
+   * line already covered by a range is recorded rather than silently swallowed. Anchors are
+   * excluded: they describe the code, not which declaration this is.
+   */
   private areDeclaredReferencesEqual(
     left: DeclaredReference,
     right: DeclaredReference,
@@ -1003,20 +986,19 @@ export class NotesService {
       return false;
     }
 
-    const leftLine =
-      typeof left.line === 'number' &&
-      Number.isInteger(left.line) &&
-      left.line > 0
-        ? left.line
-        : undefined;
-    const rightLine =
-      typeof right.line === 'number' &&
-      Number.isInteger(right.line) &&
-      right.line > 0
-        ? right.line
-        : undefined;
+    if (leftPath !== rightPath) {
+      return false;
+    }
 
-    return leftPath === rightPath && leftLine === rightLine;
+    const sameNumber = (a: unknown, b: unknown) =>
+      normalizeReferenceLine(a) === normalizeReferenceLine(b);
+
+    return (
+      sameNumber(left.line, right.line) &&
+      sameNumber(left.endLine, right.endLine) &&
+      sameNumber(left.column, right.column) &&
+      (left.symbol ?? '') === (right.symbol ?? '')
+    );
   }
 
   private async patchFrontmatterSection(
@@ -1222,43 +1204,73 @@ export class NotesService {
 
     const indentMatch = entryText.match(/\n(\s+)-\s*file:/);
     const indent = indentMatch ? indentMatch[1] : '  ';
-    const detailIndent = `${indent}  `;
     const trimmed = entryText.endsWith('\n')
       ? entryText.slice(0, -1)
       : entryText;
-    let result = trimmed;
-    for (const ref of additions) {
-      result += `\n${indent}- file: ${ref.file}`;
-      if (typeof ref.line === 'number' && Number.isFinite(ref.line)) {
-        result += `\n${detailIndent}line: ${ref.line}`;
-      }
-      if (typeof ref.endLine === 'number' && Number.isFinite(ref.endLine)) {
-        result += `\n${detailIndent}endLine: ${ref.endLine}`;
-      }
-      if (ref.symbol) {
-        result += `\n${detailIndent}symbol: ${ref.symbol}`;
-      }
-    }
-    return `${result}\n`;
+
+    const extra = additions
+      .map((ref) => this.buildStructuredReferenceRow(ref, indent).join('\n'))
+      .join('\n');
+
+    return `${trimmed}\n${extra}\n`;
   }
 
   private buildStructuredReferences(references: DeclaredReference[]): string {
     const lines = ['references:'];
     for (const ref of references) {
-      lines.push(`  - file: ${ref.file}`);
-      if (typeof ref.line === 'number' && Number.isFinite(ref.line)) {
-        lines.push(`    line: ${ref.line}`);
-      }
-      if (typeof ref.endLine === 'number' && Number.isFinite(ref.endLine)) {
-        lines.push(`    endLine: ${ref.endLine}`);
-      }
-      if (ref.symbol) {
-        lines.push(`    symbol: ${ref.symbol}`);
-      }
+      lines.push(...this.buildStructuredReferenceRow(ref, '  '));
     }
     return `${lines.join('\n')}\n`;
   }
 
+  /**
+   * Serializes one reference as a structured YAML row.
+   *
+   * @remarks
+   * Field order is fixed (path, position, identity) so that appending a reference never
+   * reshuffles what is already on disk. Only fields the reference actually carries are
+   * written: nothing is normalized into existence.
+   */
+  private buildStructuredReferenceRow(
+    ref: DeclaredReference,
+    indent: string,
+  ): string[] {
+    const detailIndent = `${indent}  `;
+    const rows = [`${indent}- file: ${ref.file}`];
+
+    const numericDetails: [string, number | undefined][] = [
+      ['line', ref.line],
+      ['endLine', ref.endLine],
+      ['column', ref.column],
+      ['endColumn', ref.endColumn],
+    ];
+
+    for (const [key, value] of numericDetails) {
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        rows.push(`${detailIndent}${key}: ${value}`);
+      }
+    }
+
+    if (ref.symbol) {
+      rows.push(`${detailIndent}symbol: ${quoteYamlScalar(ref.symbol)}`);
+    }
+
+    if (ref.anchor) {
+      rows.push(`${detailIndent}anchor: ${quoteYamlScalar(ref.anchor)}`);
+    }
+
+    return rows;
+  }
+
+  /**
+   * Serializes a reference in compact form.
+   *
+   * @remarks
+   * Used only when the note already writes its references compactly, so that appending never
+   * rewrites the author's chosen style. The compact grammar cannot express an anchor, so
+   * references appended to a compact list keep position and symbol evidence only - which is
+   * why new `references:` blocks are written structured.
+   */
   private formatCompactReference(ref: DeclaredReference): string {
     let value = ref.file;
     if (typeof ref.line === 'number' && Number.isFinite(ref.line)) {
@@ -1566,55 +1578,11 @@ export class NotesService {
     workspaceRoot: Uri,
     fileRef: string,
   ): Uri[] {
-    const trimmedRaw = fileRef.trim();
-    if (!trimmedRaw) {
-      return [];
-    }
-
-    const slashPath = trimmedRaw.replace(/\\/g, '/');
-    const isAbsolutePosix = slashPath.startsWith('/');
-    const isAbsoluteWin = /^[a-zA-Z]:/.test(slashPath);
-
-    if (isAbsolutePosix || isAbsoluteWin) {
-      try {
-        return [Uri.file(trimmedRaw)];
-      } catch {
-        return [];
-      }
-    }
-
-    const segments = slashPath.split('/').filter((s) => s !== '' && s !== '.');
-    const candidates: Uri[] = [];
-
-    try {
-      let uri = workspaceRoot;
-      for (const segment of segments) {
-        uri =
-          segment === '..'
-            ? Uri.joinPath(uri, '..')
-            : Uri.joinPath(uri, segment);
-      }
-      candidates.push(uri);
-    } catch {
-      // Ignore resolution failures for this base.
-    }
-
-    if (this.notesDir) {
-      try {
-        let uri = this.notesDir;
-        for (const segment of segments) {
-          uri =
-            segment === '..'
-              ? Uri.joinPath(uri, '..')
-              : Uri.joinPath(uri, segment);
-        }
-        candidates.push(uri);
-      } catch {
-        // Ignore resolution failures for the notes directory base.
-      }
-    }
-
-    return candidates;
+    return resolveReferenceFileCandidates(
+      workspaceRoot,
+      this.notesDir,
+      fileRef,
+    );
   }
 
   /**

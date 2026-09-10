@@ -9,6 +9,8 @@ export * from './path.helper';
 export * from './path-format.helper';
 export * from './read-file-content.helper';
 export * from './reference.helper';
+export * from './reference-match.helper';
+export * from './reference-resolver.helper';
 export * from './relative-path.helper';
 export * from './resolve.helper';
 export * from './save-file.helper';

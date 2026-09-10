@@ -20,10 +20,23 @@ import {
 
 import { CommandIds, EXTENSION_ID, type ExtensionConfig } from '../configs';
 import { debounce, getMostRecentType, getRecencyIndex } from '../helpers';
+import type { FileContextEntry } from '../models';
 import { NotesService } from '../services';
 
 type ClickableAfterAttachment = ThemableDecorationAttachmentRenderOptions & {
   command?: Command;
+};
+
+/** One note as rendered inside a decoration hover. */
+type HoverEntry = {
+  label: string;
+  summary?: string;
+  refs?: number;
+  uri: Uri;
+  id: string;
+  type?: string;
+  /** Declared line, present only when the reference had to move to stay correct. */
+  movedFromLine?: number;
 };
 
 function escapeMarkdownInline(text: string): string {
@@ -90,7 +103,11 @@ export class ContextDecorationProvider {
   }
 
   /**
-   * Computes reference lines for the editor file and applies whole-line trailing 💡 markers with hover and click.
+   * Marks the lines of `editor` that carry context, resolving each reference first.
+   *
+   * @remarks
+   * Markers sit on *resolved* lines, so a note whose code moved marks where the code is now,
+   * and a reference that could not be located without guessing is not marked at all.
    */
   async updateDecorations(editor: TextEditor): Promise<void> {
     if (!this.config.enable) {
@@ -106,9 +123,9 @@ export class ContextDecorationProvider {
     const docVersion = editor.document.version;
     const fileUri = editor.document.uri;
 
-    let lines: number[];
+    let entries: FileContextEntry[];
     try {
-      lines = await this.notesService.getContextDecorationLinesForFile(fileUri);
+      entries = await this.notesService.getContextEntriesForFile(fileUri);
     } catch (error) {
       console.error('ContextDecorationProvider:', error);
       editor.setDecorations(this.decorationType, []);
@@ -120,10 +137,25 @@ export class ContextDecorationProvider {
     }
 
     const lineCount = editor.document.lineCount;
-    let validLines = lines.filter((line) => line >= 1 && line <= lineCount);
+    const byLine = new Map<number, FileContextEntry[]>();
+
+    for (const entry of entries) {
+      const line = entry.startLine;
+      if (line === undefined || line < 1 || line > lineCount) {
+        continue;
+      }
+
+      const bucket = byLine.get(line);
+      if (bucket) {
+        bucket.push(entry);
+      } else {
+        byLine.set(line, [entry]);
+      }
+    }
 
     // Contextual density throttling: limit decorations to nearest lines when many
     const MaxDecorations = 30;
+    let validLines = [...byLine.keys()].sort((a, b) => a - b);
     if (validLines.length > MaxDecorations) {
       const current = editor.selection?.active.line ?? 0;
       validLines = validLines
@@ -134,56 +166,47 @@ export class ContextDecorationProvider {
         .sort((a, b) => a - b);
     }
 
-    let byLine: Map<number, { id: string; uri: Uri; title?: string }[]>;
-    try {
-      byLine = await this.notesService.getNotesForFileGroupedByReferenceLine(
-        fileUri,
-        validLines,
-      );
-    } catch (error) {
-      console.error('ContextDecorationProvider:', error);
-      editor.setDecorations(this.decorationType, []);
-      return;
-    }
-
-    if (editor.document.version !== docVersion) {
-      return;
-    }
-
     const decorations: DecorationOptions[] = [];
 
     for (const line of validLines) {
-      const notes = byLine.get(line);
-      if (!notes?.length) {
+      const lineEntries = byLine.get(line);
+      if (!lineEntries?.length) {
         continue;
       }
 
       // Build richer preview for hover: include summary and reference counts (bounded)
       const maxItems = 5;
-      const enrichedAll: {
-        label: string;
-        summary?: string;
-        refs?: number;
-        uri: Uri;
-        id: string;
-        type?: string;
-      }[] = [];
-      for (const n of notes) {
+      const enrichedAll: HoverEntry[] = [];
+      const seenNotes = new Set<string>();
+
+      for (const entry of lineEntries) {
+        const noteKey = entry.note.uri.toString();
+        if (seenNotes.has(noteKey)) {
+          continue;
+        }
+        seenNotes.add(noteKey);
+
+        const label = entry.note.title?.trim()
+          ? entry.note.title
+          : entry.note.id;
+
         try {
-          const note = await this.notesService.getNote(n.uri);
+          const note = await this.notesService.getNote(entry.note.uri);
           enrichedAll.push({
-            label: n.title?.trim() ? n.title : n.id,
+            label,
             summary: note?.summary?.trim(),
             refs: note?.references?.length,
-            uri: n.uri,
-            id: n.id,
+            uri: entry.note.uri,
+            id: entry.note.id,
             type: note?.type,
+            movedFromLine: entry.movedFromLine,
           });
         } catch {
           enrichedAll.push({
-            label: n.title?.trim() ? n.title : n.id,
-            uri: n.uri,
-            id: n.id,
+            label,
+            uri: entry.note.uri,
+            id: entry.note.id,
+            movedFromLine: entry.movedFromLine,
           });
         }
       }
@@ -212,7 +235,7 @@ export class ContextDecorationProvider {
         shown,
         fileUri,
         line,
-        notes.length,
+        enrichedAll.length,
       );
 
       const z = line - 1;
@@ -234,13 +257,7 @@ export class ContextDecorationProvider {
   }
 
   private buildContextHoverMarkdownFromNotes(
-    notes: readonly {
-      label: string;
-      summary?: string;
-      refs?: number;
-      uri: Uri;
-      id: string;
-    }[],
+    notes: readonly HoverEntry[],
     fileUri: Uri,
     line: number,
     total: number,
@@ -259,6 +276,11 @@ export class ContextDecorationProvider {
       md.appendMarkdown(`\n• **${escapeMarkdownInline(n.label)}**`);
       if (n.refs !== undefined) {
         md.appendMarkdown(` - ${l10n.t('{0} references', String(n.refs))}`);
+      }
+      if (n.movedFromLine !== undefined) {
+        md.appendMarkdown(
+          `  \n  $(arrow-right) _${l10n.t('moved from line {0}', String(n.movedFromLine))}_`,
+        );
       }
       if (n.summary) {
         md.appendMarkdown(`  \n  _${escapeMarkdownInline(n.summary)}_`);

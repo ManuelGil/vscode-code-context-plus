@@ -3,27 +3,40 @@ import { parseFrontmatterDialect } from './frontmatter-dialect.helper';
 import {
   normalizeDeclaredReference,
   stripYamlQuotes,
+  unquoteYamlScalar,
 } from './normalization.helper';
 
 /**
- * Parses a compact reference item like `path/to/file#12` into a DeclaredReference.
+ * Compact reference grammar: `path[#start[(:|-)end]][@symbol]`.
+ *
+ * @remarks
+ * `#L12` and `#12` are equivalent, and a range accepts either separator (`#2-5`, `#2:5`),
+ * because both spellings are already in circulation. Anchors have no compact spelling - they
+ * hold literal source text - so a compact entry carries position and symbol only.
+ *
+ * The symbol may not contain `/`, which is what keeps a scoped path such as
+ * `src/@scope/pkg/index.ts` from being read as a path plus a symbol.
+ */
+const COMPACT_REFERENCE = /^(.*?)(?:#L?(\d+)(?:[:-]L?(\d+))?)?(?:@([^\s/]+))?$/;
+
+/**
+ * Parses a compact reference item such as `path/to/file#12` into a {@link DeclaredReference}.
  */
 function parseCompactReference(item: string): DeclaredReference {
   const trimmed = String(item ?? '').trim();
 
-  // Match `path#start:end@symbol`, `path#start:end`, `path#line@symbol`,
-  // `path#line`, `path@symbol`, or just `path`.
-  const m = trimmed.match(/^(.*?)(?:#(\d+)(?::(\d+))?)?(?:@(\S+))?$/);
-  if (!m) {
+  const match = trimmed.match(COMPACT_REFERENCE);
+  if (!match) {
     return { file: stripYamlQuotes(trimmed) };
   }
 
-  const rawPath = stripYamlQuotes((m[1] ?? '').trim());
-  const line = m[2] ? Number.parseInt(m[2], 10) : undefined;
-  const endLine = m[3] ? Number.parseInt(m[3], 10) : undefined;
-  const symbol = m[4] ? stripYamlQuotes(m[4].trim()) : undefined;
+  const rawPath = stripYamlQuotes((match[1] ?? '').trim());
+  const line = match[2] ? Number.parseInt(match[2], 10) : undefined;
+  const endLine = match[3] ? Number.parseInt(match[3], 10) : undefined;
+  const symbol = match[4] ? stripYamlQuotes(match[4].trim()) : undefined;
 
   const out: DeclaredReference = { file: rawPath };
+
   if (typeof line === 'number' && Number.isFinite(line)) {
     out.line = line;
   }
@@ -37,12 +50,65 @@ function parseCompactReference(item: string): DeclaredReference {
   return out;
 }
 
+/** Structured detail keys that qualify the `- file:` row above them. */
+const NUMERIC_DETAIL_KEYS = ['line', 'endLine', 'column', 'endColumn'] as const;
+const TEXT_DETAIL_KEYS = ['symbol', 'anchor'] as const;
+
+type NumericDetailKey = (typeof NUMERIC_DETAIL_KEYS)[number];
+type TextDetailKey = (typeof TEXT_DETAIL_KEYS)[number];
+
+/**
+ * Applies one indented `key: value` detail line to the reference being built.
+ *
+ * @returns `true` when the line was a recognized detail.
+ */
+function applyStructuredDetail(
+  target: DeclaredReference,
+  line: string,
+): boolean {
+  const match = line.match(/^\s+([A-Za-z_][\w-]*)\s*:\s*(.*)$/);
+  if (!match) {
+    return false;
+  }
+
+  const key = match[1];
+  const rawValue = match[2];
+
+  if ((NUMERIC_DETAIL_KEYS as readonly string[]).includes(key)) {
+    const parsed = Number.parseInt(stripYamlQuotes(rawValue).trim(), 10);
+
+    if (Number.isInteger(parsed) && parsed > 0) {
+      target[key as NumericDetailKey] = parsed;
+    }
+
+    return true;
+  }
+
+  if ((TEXT_DETAIL_KEYS as readonly string[]).includes(key)) {
+    const value = unquoteYamlScalar(rawValue);
+
+    if (value.length > 0) {
+      target[key as TextDetailKey] = value;
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Tolerantly parses `references:` from the restricted frontmatter dialect used by the extension.
  *
- * Supports both compact list forms (inline lists or `- item` strings containing `path#line`) and
- * the structured mapping form (`- file: <path>\n  line: <n>`). Always returns normalized rows
- * with trimmed file paths and integer 1-based lines when present.
+ * @remarks
+ * Both authoring forms are read into the same model and neither is preferred:
+ *
+ * - compact list items (`- src/auth/auth.service.ts#42`, inline bracket lists);
+ * - structured mappings (`- file: <path>` followed by indented `line`, `endLine`, `column`,
+ *   `endColumn`, `symbol` and `anchor` details).
+ *
+ * Unknown detail keys are ignored rather than rejected, so a note carrying fields this version
+ * does not understand still yields its references.
  */
 export function parseDeclaredReferencesFromFrontmatter(
   frontmatter: string,
@@ -110,9 +176,8 @@ export function parseDeclaredReferencesFromFrontmatter(
 
     const fileMatch = line.match(/^\s*-\s*file:\s*(.+)$/);
     if (fileMatch) {
-      const rawPath = fileMatch[1].trim();
-      const filePath = stripYamlQuotes(rawPath);
-      if (typeof filePath === 'string' && filePath.trim().length > 0) {
+      const filePath = stripYamlQuotes(fileMatch[1].trim());
+      if (filePath.trim().length > 0) {
         refs.push({ file: filePath.trim() });
       }
       continue;
@@ -120,43 +185,12 @@ export function parseDeclaredReferencesFromFrontmatter(
 
     const compactMatch = line.match(/^\s*-\s*(.+)$/);
     if (compactMatch) {
-      const item = compactMatch[1].trim();
-      refs.push(parseCompactReference(item));
+      refs.push(parseCompactReference(compactMatch[1].trim()));
       continue;
     }
 
-    const lineMatch = line.match(/^\s+line:\s*(.+)$/);
-    if (lineMatch && refs.length > 0) {
-      const n = Number.parseInt(lineMatch[1].trim(), 10);
-      const last = refs[refs.length - 1];
-      const parsedLine =
-        typeof n === 'number' &&
-        Number.isFinite(n) &&
-        Number.isInteger(n) &&
-        n > 0
-          ? n
-          : undefined;
-      if (parsedLine !== undefined) {
-        last.line = parsedLine;
-      }
-      continue;
-    }
-
-    const endLineMatch = line.match(/^\s+endLine:\s*(.+)$/);
-    if (endLineMatch && refs.length > 0) {
-      const n = Number.parseInt(endLineMatch[1].trim(), 10);
-      const last = refs[refs.length - 1];
-      const parsedEndLine =
-        typeof n === 'number' &&
-        Number.isFinite(n) &&
-        Number.isInteger(n) &&
-        n > 0
-          ? n
-          : undefined;
-      if (parsedEndLine !== undefined) {
-        last.endLine = parsedEndLine;
-      }
-      continue;
+    if (refs.length > 0) {
+      applyStructuredDetail(refs[refs.length - 1], line);
     }
   }
 

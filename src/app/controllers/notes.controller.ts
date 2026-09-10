@@ -9,11 +9,11 @@
 
 import {
   l10n,
-  Position,
   type QuickPickItem,
   Range,
   Selection,
   type TextEditor,
+  TextEditorRevealType,
   Uri,
   window,
   workspace,
@@ -21,10 +21,12 @@ import {
 
 import { EXTENSION_DISPLAY_NAME, ExtensionConfig } from '../configs';
 import {
+  captureReferenceLocation,
   getTrail,
   hasTags,
   openDocument,
   pushContext,
+  type ReferenceIssue,
   showNoWorkspaceFolderError,
 } from '../helpers';
 import type { Note } from '../models';
@@ -224,6 +226,13 @@ export class NotesController {
       return;
     }
 
+    // Captured before the picker so the reference describes what the user was looking at,
+    // including the anchor text and enclosing symbol that make it recoverable later.
+    const capturedLocation = await captureReferenceLocation(
+      activeEditor.document,
+      activeEditor.selection,
+    );
+
     const notes = await this.notesService.getAllNotes();
     const noteItems = this.toNoteQuickPickItems(notes);
     const selectedItems = await window.showQuickPick(noteItems, {
@@ -238,7 +247,6 @@ export class NotesController {
     }
 
     const fileUri = activeEditor.document.uri;
-    const currentLine = activeEditor.selection.active.line + 1;
     let addedCount = 0;
     let duplicateCount = 0;
 
@@ -246,7 +254,7 @@ export class NotesController {
       const outcome = await this.notesService.addReferenceForLocation(
         selectedItem.note,
         fileUri,
-        currentLine,
+        capturedLocation,
       );
 
       if (outcome === 'added') {
@@ -406,11 +414,13 @@ export class NotesController {
   }
 
   /**
-   * Resolves frontmatter code references for the active note and opens the chosen file (optional line).
+   * Resolves frontmatter code references for the active note and opens the chosen location.
    *
-   * Constraints:
-   * - Reads `references` only from YAML frontmatter.
-   * - Broken targets are listed but cannot be opened.
+   * @remarks
+   * References are resolved against the code as it is now, so an entry whose code moved opens
+   * where that code lives today and says so. Entries that cannot be located without choosing
+   * between candidates are listed as unresolved with the reason, and open the file at its top
+   * rather than a plausible-looking wrong line.
    */
   public async openReference(): Promise<void> {
     try {
@@ -425,49 +435,56 @@ export class NotesController {
         return;
       }
 
-      const resolved =
+      const { resolved, unresolved } =
         await this.notesService.getResolvedReferences(currentNoteId);
-      const hasValid = resolved.valid.length > 0;
-      const hasBroken = resolved.broken.length > 0;
 
-      if (!hasValid && !hasBroken) {
+      if (resolved.length === 0 && unresolved.length === 0) {
         window.showInformationMessage(
           l10n.t('Current note has no declared references'),
         );
         return;
       }
 
-      if (!hasValid && hasBroken) {
-        window.showWarningMessage(l10n.t('All declared references are broken'));
+      if (resolved.length === 0) {
+        window.showWarningMessage(
+          l10n.t('No declared reference could be resolved'),
+        );
       }
 
       type RefPick = QuickPickItem & {
         uri?: Uri;
-        targetLine?: number;
-        isBroken: boolean;
+        range?: Range;
       };
 
       const items: RefPick[] = [
-        ...resolved.valid.map((ref): RefPick => {
-          const rel = workspace.asRelativePath(ref.uri, false);
-          const lineLabel =
-            ref.line !== undefined
-              ? l10n.t('Line {0}', String(ref.line))
-              : l10n.t('Top of file');
+        ...resolved.map((ref): RefPick => {
+          const startLine = ref.startLine;
+          const endLine = ref.endLine;
+
+          const position =
+            endLine > startLine
+              ? l10n.t('Lines {0}-{1}', String(startLine), String(endLine))
+              : l10n.t('Line {0}', String(startLine));
+
+          const drift =
+            ref.movedFromLine !== undefined
+              ? ` - ${l10n.t('moved from line {0}', String(ref.movedFromLine))}`
+              : '';
+
           return {
-            label: `$(check) ${rel}`,
-            description: lineLabel,
+            label: `$(check) ${workspace.asRelativePath(ref.uri, false)}`,
+            description: `${position}${drift}`,
+            detail: ref.ref.symbol ?? ref.ref.anchor,
             uri: ref.uri,
-            targetLine: ref.line,
-            isBroken: false,
+            range: ref.range,
           };
         }),
-        ...resolved.broken.map(
-          (b): RefPick => ({
-            label: `$(warning) ${b.file}`,
-            description: l10n.t('Broken reference'),
-            detail: b.reason,
-            isBroken: true,
+        ...unresolved.map(
+          (ref): RefPick => ({
+            label: `$(warning) ${ref.ref.file}`,
+            description: l10n.t('Unresolved reference'),
+            detail: this.describeReferenceIssue(ref.issue, ref.candidateCount),
+            uri: ref.uri,
           }),
         ),
       ];
@@ -479,27 +496,72 @@ export class NotesController {
         return;
       }
 
-      if (selected.isBroken || !selected.uri) {
-        window.showWarningMessage(l10n.t('Cannot open broken reference'));
+      if (!selected.uri) {
+        window.showWarningMessage(l10n.t('Cannot open unresolved reference'));
         return;
       }
 
       const doc = await workspace.openTextDocument(selected.uri);
-      let reveal: Selection | undefined;
-      const ln = selected.targetLine;
-      if (ln !== undefined && ln >= 1) {
-        const zero = ln - 1;
-        if (zero < doc.lineCount) {
-          reveal = new Selection(new Position(zero, 0), new Position(zero, 0));
-        }
+
+      if (!selected.range) {
+        window.showWarningMessage(
+          l10n.t('Reference could not be located; opening the file'),
+        );
+        await openDocument(doc);
+        return;
       }
 
-      await openDocument(doc, reveal ? { selection: reveal } : undefined);
+      const editor = await openDocument(doc, {
+        selection: new Selection(selected.range.start, selected.range.end),
+      });
+      editor.revealRange(
+        selected.range,
+        TextEditorRevealType.InCenterIfOutsideViewport,
+      );
     } catch (error) {
       console.error('Error opening reference:', error);
       window.showErrorMessage(
         l10n.t('An error occurred while opening reference'),
       );
+    }
+  }
+
+  /**
+   * Explains why a reference could not be pointed at code.
+   *
+   * @remarks
+   * The distinction that matters to the reader is "the code is gone" versus "several places
+   * match" - the second is a conflict the note owner can resolve, the first is not.
+   */
+  private describeReferenceIssue(
+    issue: ReferenceIssue,
+    candidateCount?: number,
+  ): string {
+    switch (issue) {
+      case 'file-not-found':
+        return l10n.t('File not found');
+      case 'path-ambiguous':
+        return l10n.t('Several files match this reference');
+      case 'line-out-of-range':
+        return l10n.t('The referenced line no longer exists');
+      case 'anchor-not-found':
+        return l10n.t('The referenced code was not found in this file');
+      case 'anchor-ambiguous':
+        return l10n.t(
+          'The referenced code appears in {0} places',
+          String(candidateCount ?? 0),
+        );
+      case 'symbol-not-found':
+        return l10n.t('The referenced symbol was not found in this file');
+      case 'symbol-ambiguous':
+        return l10n.t(
+          'The referenced symbol matches {0} declarations',
+          String(candidateCount ?? 0),
+        );
+      case 'symbol-provider-unavailable':
+        return l10n.t('No symbol provider is available for this language');
+      default:
+        return l10n.t('Unresolved reference');
     }
   }
 

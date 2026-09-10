@@ -40,16 +40,42 @@ export type NotesIdentityValidationWarning = {
 // Core note model
 // -----------------------------------------------------------------------------
 
-/** Single `references:` row from YAML frontmatter (paths not yet resolved to workspace URIs). */
+/**
+ * Single `references:` row from YAML frontmatter (paths not yet resolved to workspace URIs).
+ *
+ * @remarks
+ * `file` is the only required field; everything else narrows the reference and makes it
+ * recoverable after the code moves. The fields divide into two groups:
+ *
+ * - **Position** (`line`, `endLine`, `column`, `endColumn`): where the code was. Exact while
+ *   nothing above it changes, and worthless once it does.
+ * - **Identity** (`symbol`, `anchor`): what the code *is*. Neither can be reconstructed later,
+ *   which is why both are persisted; everything derivable from them is resolved on demand.
+ */
 export type DeclaredReference = {
   file: string;
   /** Single 1-based line number for precise reference. */
   line?: number;
   /** Optional inclusive end line for range references (1-based). */
   endLine?: number;
-  /** Optional lightweight symbol identifier (compatibility for compact syntax only). */
+  /** Optional 1-based start column, honored only while the declared line still holds. */
+  column?: number;
+  /** Optional 1-based end column (exclusive). */
+  endColumn?: number;
+  /** Optional qualified symbol name, e.g. `AuthService.login`. */
   symbol?: string;
+  /** Optional literal source text of the referenced line, used to follow it when it moves. */
+  anchor?: string;
 };
+
+/**
+ * Location evidence captured from an editor when a reference is created.
+ *
+ * @remarks
+ * Everything except the file path: the caller owns the position and identity fields, the
+ * service owns turning a `Uri` into a persisted workspace-relative path.
+ */
+export type DeclaredReferenceLocation = Omit<DeclaredReference, 'file'>;
 
 /** Markdown note payload loaded from disk (including fields parsed from frontmatter). */
 export interface Note {
@@ -127,13 +153,22 @@ export type ResolvedLinksResult = {
 };
 
 /**
- * Resolved `references:` targets against workspace paths.
+ * One declared reference that targets a given file, resolved against its current text.
  *
- * `broken` captures invalid paths or missing files without throwing for individual references.
+ * @remarks
+ * `startLine`/`endLine` are the 1-based inclusive span the reference currently covers. They are
+ * absent - and `issue` is set - when the reference could not be located without guessing.
  */
-export type ResolvedReferencesResult = {
-  valid: { file: string; uri: Uri; line?: number }[];
-  broken: { file: string; reason: string }[];
+export type FileContextEntry = {
+  note: NoteReference;
+  ref: DeclaredReference;
+  startLine?: number;
+  endLine?: number;
+  strategy?: string;
+  /** Declared line, present only when the reference had to move to stay correct. */
+  movedFromLine?: number;
+  /** Why the reference could not be located. */
+  issue?: string;
 };
 
 // -----------------------------------------------------------------------------

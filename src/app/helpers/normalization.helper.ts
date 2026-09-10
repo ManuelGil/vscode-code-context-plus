@@ -31,6 +31,57 @@ export function stripYamlQuotes(value: string): string {
 }
 
 /**
+ * Reads a YAML scalar that may be quoted, resolving escapes inside double quotes.
+ *
+ * @remarks
+ * Used for values that legitimately contain `:`, `#` or quotes - anchors hold literal source
+ * text - where {@link stripYamlQuotes} alone would leave `\"` sequences behind.
+ *
+ * @param value Raw YAML scalar value.
+ */
+export function unquoteYamlScalar(value: string): string {
+  const normalizedValue = String(value ?? '').trim();
+
+  if (
+    normalizedValue.length >= 2 &&
+    normalizedValue.startsWith('"') &&
+    normalizedValue.endsWith('"')
+  ) {
+    return normalizedValue
+      .slice(1, -1)
+      .replace(/\\(["\\])/g, '$1')
+      .replace(/\\n/g, '\n');
+  }
+
+  return stripYamlQuotes(normalizedValue);
+}
+
+/**
+ * Serializes a string as a YAML scalar, quoting only when the plain form would be unsafe.
+ *
+ * @param value Value to serialize.
+ */
+export function quoteYamlScalar(value: string): string {
+  const normalizedValue = String(value ?? '');
+
+  const needsQuotes =
+    normalizedValue.trim() !== normalizedValue ||
+    normalizedValue.length === 0 ||
+    /[:#"'\\\n]|^[-?&*!|>%@`[\]{},]/.test(normalizedValue);
+
+  if (!needsQuotes) {
+    return normalizedValue;
+  }
+
+  const escaped = normalizedValue
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n');
+
+  return `"${escaped}"`;
+}
+
+/**
  * Normalizes a reference file path into a deterministic
  * workspace-relative POSIX path.
  *
@@ -129,42 +180,59 @@ export function normalizeDeclaredReference(
     return null;
   }
 
-  const normalizedLine = normalizeReferenceLine(reference.line);
-  const normalizedEndLine = normalizeReferenceLine((reference as any).endLine);
-  const symbolRaw = (reference as any).symbol;
+  let normalizedLine = normalizeReferenceLine(reference.line);
+  let normalizedEndLine = normalizeReferenceLine(reference.endLine);
+  const normalizedColumn = normalizeReferenceLine(reference.column);
+  const normalizedEndColumn = normalizeReferenceLine(reference.endColumn);
+
   const normalizedSymbol =
-    typeof symbolRaw === 'string' && symbolRaw.trim().length > 0
-      ? stripYamlQuotes(symbolRaw).trim()
+    typeof reference.symbol === 'string' && reference.symbol.trim().length > 0
+      ? stripYamlQuotes(reference.symbol).trim()
       : undefined;
 
-  // If neither line nor symbol is present, return file-level reference.
-  if (normalizedLine === undefined && normalizedSymbol === undefined) {
-    return { file: normalizedFile };
-  }
+  const normalizedAnchor =
+    typeof reference.anchor === 'string' && reference.anchor.trim().length > 0
+      ? reference.anchor.trim()
+      : undefined;
 
-  // Coerce range if endLine is set and ensure inclusive ordering.
-  if (normalizedEndLine !== undefined && normalizedLine !== undefined) {
+  // A range is stored inclusive and ordered; an end without a start carries no meaning.
+  if (normalizedLine !== undefined && normalizedEndLine !== undefined) {
     const start = Math.min(normalizedLine, normalizedEndLine);
     const end = Math.max(normalizedLine, normalizedEndLine);
-    return {
-      file: normalizedFile,
-      line: start,
-      endLine: end,
-      ...(normalizedSymbol ? { symbol: normalizedSymbol } : {}),
-    };
+    normalizedLine = start;
+    normalizedEndLine = end;
+  } else if (normalizedLine === undefined) {
+    normalizedEndLine = undefined;
   }
 
-  // Single line with possible symbol.
+  const normalized: DeclaredReference = { file: normalizedFile };
+
   if (normalizedLine !== undefined) {
-    return {
-      file: normalizedFile,
-      line: normalizedLine,
-      ...(normalizedSymbol ? { symbol: normalizedSymbol } : {}),
-    };
+    normalized.line = normalizedLine;
   }
 
-  // Symbol-only reference.
-  return { file: normalizedFile, symbol: normalizedSymbol };
+  if (normalizedEndLine !== undefined) {
+    normalized.endLine = normalizedEndLine;
+  }
+
+  // Columns only qualify a line; they are dropped when there is nothing to qualify.
+  if (normalizedLine !== undefined && normalizedColumn !== undefined) {
+    normalized.column = normalizedColumn;
+
+    if (normalizedEndColumn !== undefined) {
+      normalized.endColumn = normalizedEndColumn;
+    }
+  }
+
+  if (normalizedSymbol) {
+    normalized.symbol = normalizedSymbol;
+  }
+
+  if (normalizedAnchor) {
+    normalized.anchor = normalizedAnchor;
+  }
+
+  return normalized;
 }
 
 /**
@@ -221,11 +289,11 @@ export function areReferencesEqual(
   }
 
   const leftLine = normalizeReferenceLine(left.line);
-  const leftEnd = normalizeReferenceLine((left as any).endLine);
+  const leftEnd = normalizeReferenceLine(left.endLine);
   const leftSymbol = typeof left.symbol === 'string' ? left.symbol : undefined;
 
   const rightLine = normalizeReferenceLine(right.line);
-  const rightEnd = normalizeReferenceLine((right as any).endLine);
+  const rightEnd = normalizeReferenceLine(right.endLine);
   const rightSymbol =
     typeof right.symbol === 'string' ? right.symbol : undefined;
 
